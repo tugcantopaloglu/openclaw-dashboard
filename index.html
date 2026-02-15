@@ -1194,6 +1194,10 @@ body {
         <span class="icon">🧠</span>
         <span class="nav-text">Memory</span>
       </div>
+      <div class="nav-item" data-page="files">
+        <span class="icon">📁</span>
+        <span class="nav-text">Files</span>
+      </div>
       <div class="nav-item" data-page="logs">
         <span class="icon">📋</span>
         <span class="nav-text">Logs</span>
@@ -1739,6 +1743,33 @@ body {
       </div>
     </div>
 
+    <div class="page" id="files">
+      <div class="page-header">
+        <h1 class="page-title">Files</h1>
+        <p class="page-subtitle">Key workspace and config files</p>
+      </div>
+
+      <div class="grid grid-2 mb-24">
+        <div class="card">
+          <div style="display:flex;align-items:center;gap:10px;margin-bottom:12px;">
+            <h3 class="card-title" style="margin-bottom:0;flex:1;">Key Files</h3>
+            <button onclick="window.fetchKeyFiles()" style="padding:4px 10px;background:var(--bg-tertiary);color:var(--text-secondary);border:1px solid var(--border);border-radius:6px;font-size:11px;cursor:pointer;">↻ Refresh</button>
+          </div>
+          <div id="keyFilesList" style="max-height:572px;overflow-y:auto;"></div>
+        </div>
+        <div class="card">
+          <div style="display:flex;align-items:center;gap:10px;margin-bottom:12px;flex-wrap:wrap;">
+            <h3 class="card-title" id="keyFileTitle" style="margin-bottom:0;flex:1;">Select a file</h3>
+            <button id="keyFileEditBtn" onclick="window.editKeyFile()" style="display:none;padding:6px 14px;background:var(--accent);color:white;border:none;border-radius:6px;font-size:12px;font-weight:600;cursor:pointer;">Edit</button>
+            <button id="keyFileSaveBtn" onclick="window.saveKeyFile()" style="display:none;padding:6px 14px;background:var(--green);color:white;border:none;border-radius:6px;font-size:12px;font-weight:600;cursor:pointer;">Save</button>
+            <button id="keyFileCancelBtn" onclick="window.cancelEditKeyFile()" style="display:none;padding:6px 14px;background:var(--bg-tertiary);color:var(--text-secondary);border:1px solid var(--border);border-radius:6px;font-size:12px;font-weight:600;cursor:pointer;">Cancel</button>
+          </div>
+          <div id="keyFileContent" style="max-height:560px;overflow-y:auto;white-space:pre-wrap;font-family:'JetBrains Mono',monospace;font-size:12px;line-height:1.6;color:var(--text-primary);"></div>
+          <textarea id="keyFileEditor" style="display:none;width:100%;height:560px;background:var(--bg-primary);color:var(--text-primary);border:1px solid var(--border);border-radius:8px;padding:12px;font-family:'JetBrains Mono',monospace;font-size:12px;line-height:1.6;resize:vertical;"></textarea>
+        </div>
+      </div>
+    </div>
+
     <div class="page" id="logs">
       <div class="page-header">
         <h1 class="page-title">Logs</h1>
@@ -1858,6 +1889,9 @@ document.querySelectorAll('.nav-item').forEach(item => {
     
     if (page === 'memory') {
       fetchMemoryFiles();
+    }
+    if (page === 'files') {
+      fetchKeyFiles();
     }
   });
 });
@@ -3163,6 +3197,153 @@ window.loadMemoryFile = async function(name) {
   }
 };
 
+// Files page
+let keyFiles = [];
+let currentKeyFile = null;
+let keyFileEditing = false;
+let _currentKeyFileRaw = '';
+
+window.fetchKeyFiles = async function fetchKeyFiles() {
+  try {
+    const res = await fetch('/api/key-files');
+    keyFiles = await res.json();
+    renderKeyFilesList();
+  } catch {}
+}
+
+function renderKeyFilesList() {
+  const el = document.getElementById('keyFilesList');
+  if (!el) return;
+  const now = Date.now();
+  el.innerHTML = keyFiles.map(f => {
+    const age = now - f.modified;
+    const ago = age < 60000 ? 'just now' : age < 3600000 ? Math.round(age/60000)+'m ago' : age < 86400000 ? Math.round(age/3600000)+'h ago' : Math.round(age/86400000)+'d ago';
+    const sizeKb = (f.size / 1024).toFixed(1);
+    const icon = f.name.startsWith('skills/') ? '🎯' : f.name.endsWith('.service') ? '⚙️' : f.name.endsWith('.json') ? '🔧' : '📄';
+    const isSelected = f.name === currentKeyFile;
+    return `<div style="padding:12px;border-bottom:1px solid var(--border);cursor:pointer;transition:all 0.2s;${isSelected ? 'background:var(--bg-tertiary);' : ''}" onclick="window.loadKeyFile('${f.name.replace(/'/g, "\\'")}')" onmouseover="this.style.background='var(--bg-tertiary)'" onmouseout="this.style.background='${isSelected ? 'var(--bg-tertiary)' : 'transparent'}'">
+      <div style="display:flex;align-items:center;gap:8px;margin-bottom:4px;">
+        <span style="font-size:18px;">${icon}</span>
+        <span style="font-weight:600;font-size:13px;flex:1;">${f.name}</span>
+      </div>
+      <div style="font-size:11px;color:var(--text-muted);">${sizeKb} KB · ${ago}</div>
+    </div>`;
+  }).join('') || '<div class="empty-state-text">No files found</div>';
+}
+
+window.loadKeyFile = async function(name) {
+  currentKeyFile = name;
+  keyFileEditing = false;
+  const titleEl = document.getElementById('keyFileTitle');
+  const contentEl = document.getElementById('keyFileContent');
+  const editorEl = document.getElementById('keyFileEditor');
+  const editBtn = document.getElementById('keyFileEditBtn');
+  const saveBtn = document.getElementById('keyFileSaveBtn');
+  const cancelBtn = document.getElementById('keyFileCancelBtn');
+
+  titleEl.textContent = name;
+  contentEl.innerHTML = '<div style="color:var(--text-muted);">Loading...</div>';
+  contentEl.style.display = 'block';
+  editorEl.style.display = 'none';
+  editBtn.style.display = 'inline-block';
+  saveBtn.style.display = 'none';
+  cancelBtn.style.display = 'none';
+
+  renderKeyFilesList();
+
+  try {
+    const res = await fetch('/api/key-file?path=' + encodeURIComponent(name));
+    if (!res.ok) { contentEl.innerHTML = '<div style="color:var(--red);">Failed to load: ' + res.status + '</div>'; return; }
+    const content = await res.text();
+    _currentKeyFileRaw = content;
+
+    if (name.endsWith('.md')) {
+      let html = content
+        .replace(/</g, '&lt;').replace(/>/g, '&gt;')
+        .replace(/^### (.+)$/gm, '<div style="font-size:16px;font-weight:700;color:var(--accent);margin:16px 0 8px;">$1</div>')
+        .replace(/^## (.+)$/gm, '<div style="font-size:18px;font-weight:700;color:var(--accent);margin:20px 0 12px;">$1</div>')
+        .replace(/^# (.+)$/gm, '<div style="font-size:20px;font-weight:700;color:var(--accent);margin:24px 0 16px;">$1</div>')
+        .replace(/\*\*(.+?)\*\*/g, '<strong style="color:var(--text-primary);font-weight:700;">$1</strong>')
+        .replace(/`([^`]+)`/g, '<code style="background:var(--bg-tertiary);padding:2px 6px;border-radius:4px;font-size:11px;">$1</code>');
+      contentEl.innerHTML = html;
+    } else {
+      contentEl.innerHTML = '<pre style="white-space:pre-wrap;word-wrap:break-word;">' + content.replace(/</g, '&lt;').replace(/>/g, '&gt;') + '</pre>';
+    }
+  } catch (e) {
+    contentEl.innerHTML = '<div style="color:var(--red);">Failed to load file</div>';
+  }
+};
+
+window.editKeyFile = function() {
+  if (!currentKeyFile) return;
+  keyFileEditing = true;
+  const contentEl = document.getElementById('keyFileContent');
+  const editorEl = document.getElementById('keyFileEditor');
+  const editBtn = document.getElementById('keyFileEditBtn');
+  const saveBtn = document.getElementById('keyFileSaveBtn');
+  const cancelBtn = document.getElementById('keyFileCancelBtn');
+
+  editorEl.value = _currentKeyFileRaw;
+  contentEl.style.display = 'none';
+  editorEl.style.display = 'block';
+  editBtn.style.display = 'none';
+  saveBtn.style.display = 'inline-block';
+  cancelBtn.style.display = 'inline-block';
+  editorEl.focus();
+};
+
+window.cancelEditKeyFile = function() {
+  keyFileEditing = false;
+  const contentEl = document.getElementById('keyFileContent');
+  const editorEl = document.getElementById('keyFileEditor');
+  const editBtn = document.getElementById('keyFileEditBtn');
+  const saveBtn = document.getElementById('keyFileSaveBtn');
+  const cancelBtn = document.getElementById('keyFileCancelBtn');
+
+  contentEl.style.display = 'block';
+  editorEl.style.display = 'none';
+  editBtn.style.display = 'inline-block';
+  saveBtn.style.display = 'none';
+  cancelBtn.style.display = 'none';
+};
+
+window.saveKeyFile = async function() {
+  if (!currentKeyFile) return;
+  const editorEl = document.getElementById('keyFileEditor');
+  const saveBtn = document.getElementById('keyFileSaveBtn');
+  const content = editorEl.value;
+
+  saveBtn.textContent = 'Saving…';
+  saveBtn.disabled = true;
+
+  try {
+    const res = await fetch('/api/key-file', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ path: currentKeyFile, content })
+    });
+    const data = await res.json();
+    if (!res.ok || !data.success) throw new Error(data.error || 'Save failed');
+
+    saveBtn.textContent = 'Saved!';
+    setTimeout(() => {
+      saveBtn.textContent = 'Save';
+      saveBtn.disabled = false;
+    }, 1200);
+    window.cancelEditKeyFile();
+    await window.loadKeyFile(currentKeyFile);
+  } catch (e) {
+    saveBtn.textContent = 'Save';
+    saveBtn.disabled = false;
+    const contentEl = document.getElementById('keyFileContent');
+    const errDiv = document.createElement('div');
+    errDiv.style.cssText = 'color:var(--red);font-size:12px;margin-top:8px;';
+    errDiv.textContent = 'Error: ' + e.message;
+    contentEl.parentNode.appendChild(errDiv);
+    setTimeout(() => errDiv.remove(), 4000);
+  }
+};
+
 function formatTimeAgo(ms, future) {
   if (ms < 60000) return (future ? 'in ' : '') + 'less than a minute';
   if (ms < 3600000) return (future ? 'in ' : '') + Math.round(ms/60000) + 'm';
@@ -3380,6 +3561,7 @@ fetchData();
 fetchNewData();
 fetchHealthHistory();
 fetchMemoryFiles();
+fetchKeyFiles();
 
 // Restore auto-refresh state
 if (localStorage.getItem('usageAutoRefresh') === '1') {
@@ -3390,6 +3572,7 @@ setInterval(fetchData, 5000);
 setInterval(fetchNewData, 15000);
 setInterval(fetchHealthHistory, 60000);
 setInterval(fetchMemoryFiles, 30000);
+setInterval(fetchKeyFiles, 30000);
 
 function openSessionDetail(key) {
   const s = sessions.find(x => x.key === key);
