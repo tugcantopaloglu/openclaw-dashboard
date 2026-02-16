@@ -4903,12 +4903,20 @@ async function fetchLogs() {
   const service = document.getElementById('logService').value;
   const lines = document.getElementById('logLines').value;
   const viewer = document.getElementById('logViewer');
-  
+
   if (!viewer) return;
   viewer.innerHTML = '<div style="color:var(--text-muted);">Loading logs...</div>';
-  
+
   try {
-    const res = await fetch(`/api/logs?service=${service}&lines=${lines}`);
+    const token = getStoredToken();
+    const res = await fetch(`/api/logs?service=${service}&lines=${lines}`, {
+      headers: { 'Authorization': `Bearer ${token}` }
+    });
+
+    if (!res.ok) {
+      throw new Error(`HTTP ${res.status}: ${res.statusText}`);
+    }
+
     const logs = await res.text();
     viewer.textContent = logs;
     viewer.scrollTop = viewer.scrollHeight;
