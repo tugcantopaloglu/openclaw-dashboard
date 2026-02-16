@@ -2082,7 +2082,10 @@ function showRegistrationForm() {
   document.getElementById('registerForm').style.display = 'block';
   document.getElementById('loginForm').style.display = 'none';
   document.getElementById('recoveryForm').style.display = 'none';
-  setTimeout(() => document.getElementById('regUsername')?.focus(), 100);
+  setTimeout(() => {
+    const el = document.getElementById('regUsername');
+    if (el) el.focus();
+  }, 100);
 }
 
 function showLoginForm() {
@@ -2094,7 +2097,10 @@ function showLoginForm() {
   document.getElementById('usernameInputContainer').style.display = 'block';
   document.getElementById('passwordInputContainer').style.display = 'block';
   document.getElementById('totpInputContainer').style.display = 'none';
-  setTimeout(() => document.getElementById('username')?.focus(), 100);
+  setTimeout(() => {
+    const el = document.getElementById('username');
+    if (el) el.focus();
+  }, 100);
 }
 
 function showRecoveryForm() {
@@ -2103,7 +2109,10 @@ function showRecoveryForm() {
   document.getElementById('registerForm').style.display = 'none';
   document.getElementById('loginForm').style.display = 'none';
   document.getElementById('recoveryForm').style.display = 'block';
-  setTimeout(() => document.getElementById('recoveryToken')?.focus(), 100);
+  setTimeout(() => {
+    const el = document.getElementById('recoveryToken');
+    if (el) el.focus();
+  }, 100);
 }
 
 function calculatePasswordStrength(password) {
@@ -2462,6 +2471,9 @@ function authFetch(url, options = {}) {
   
   options.headers = options.headers || {};
   options.headers['Authorization'] = `Bearer ${token}`;
+  if (typeof options.cache === 'undefined') {
+    options.cache = 'no-store';
+  }
   
   return fetch(url, options).then(res => {
     if (res.status === 401) {
@@ -3063,7 +3075,7 @@ function updateOverview() {
   todayEl.dataset.format = 'currency';
   animateValue(todayEl, costs.today || 0);
   
-  const opusLimitsKey = Object.keys(usage.fiveHour?.perModel || {}).find(k => k.includes('opus')) || '';
+  const opusLimitsKey = Object.keys((usage.fiveHour && usage.fiveHour.perModel) || {}).find(k => k.includes('opus')) || '';
   // Overview usage card: 5h session only
   try {
     const cuRes = _cachedClaudeUsage;
@@ -3073,7 +3085,7 @@ function updateOverview() {
       sPct = cu.session.percent;
     } else {
       const opusDataOv = opusLimitsKey ? usage.fiveHour.perModel[opusLimitsKey] : { output: 0 };
-      const opusLimit = usage.estimatedLimits?.opus || 88000;
+      const opusLimit = (usage.estimatedLimits && usage.estimatedLimits.opus) || 88000;
       sPct = Math.min(Math.round((opusDataOv.output / opusLimit) * 100), 100);
     }
     const sEl = document.getElementById('ovSessionPct');
@@ -3099,7 +3111,7 @@ function updateOverview() {
     document.getElementById('systemCpu').textContent = cpuPct + '%';
     updateRadialGauge('cpuCircle', cpuPct);
     
-    const ramPct = systemStats.memory?.percent || 0;
+    const ramPct = (systemStats.memory && systemStats.memory.percent) || 0;
     document.getElementById('systemRam').textContent = ramPct + '%';
     updateRadialGauge('ramCircle', ramPct);
     const ramDetail = document.getElementById('systemRamDetail');
@@ -3581,11 +3593,11 @@ async function scrapeClaudeUsage() {
   try {
     await authFetch(API_BASE + '/api/claude-usage-scrape', { method: 'POST' });
     // Poll until data changes or timeout
-    const oldTs = _cachedClaudeUsage?.scraped_at || '';
+    const oldTs = (_cachedClaudeUsage && _cachedClaudeUsage.scraped_at) || '';
     for (let i = 0; i < 12; i++) {
       await new Promise(r => setTimeout(r, 2000));
       await fetchClaudeUsage();
-      if (_cachedClaudeUsage?.scraped_at && _cachedClaudeUsage.scraped_at !== oldTs) break;
+      if (_cachedClaudeUsage && _cachedClaudeUsage.scraped_at && _cachedClaudeUsage.scraped_at !== oldTs) break;
     }
     showToast('Usage data refreshed', 'success');
     if (typeof updateDashboard === 'function') updateDashboard();
@@ -3615,7 +3627,7 @@ function formatMs(ms) {
 
 function updateLimits() {
   const limits = usage.estimatedLimits || { opus: 88000, sonnet: 220000 };
-  const models = usage.fiveHour?.perModel || {};
+  const models = (usage.fiveHour && usage.fiveHour.perModel) || {};
 
   const opusKey = Object.keys(models).find(k => k.includes('opus')) || '';
   const sonnetKey = Object.keys(models).find(k => k.includes('sonnet')) || '';
@@ -3673,9 +3685,9 @@ function updateLimits() {
     }
   }
 
-  const resetIn = usage.fiveHour?.windowResetIn || 0;
+  const resetIn = (usage.fiveHour && usage.fiveHour.windowResetIn) || 0;
   document.getElementById('windowResetValue').textContent = resetIn > 0 ? formatMs(resetIn) : 'No window';
-  document.getElementById('windowResetSub').textContent = usage.fiveHour?.windowStart ? 'Since ' + new Date(usage.fiveHour.windowStart).toLocaleTimeString('en', {hour:'2-digit',minute:'2-digit'}) : '';
+  document.getElementById('windowResetSub').textContent = (usage.fiveHour && usage.fiveHour.windowStart) ? 'Since ' + new Date(usage.fiveHour.windowStart).toLocaleTimeString('en', {hour:'2-digit',minute:'2-digit'}) : '';
 
   const pricing = {
     opus: { input: 15, output: 75, cache: 1.875 },
@@ -3708,7 +3720,7 @@ function updateLimits() {
 
   document.getElementById('windowBreakdown').innerHTML = windowHtml || '<div class="empty-state-text">No data</div>';
 
-  const recentCalls = usage.fiveHour?.recentCalls || [];
+  const recentCalls = (usage.fiveHour && usage.fiveHour.recentCalls) || [];
   const callsHtml = recentCalls.slice(0, 15).map(call => {
     const shortModel = call.model.split('/').pop();
     return `
@@ -3992,8 +4004,10 @@ function connectLiveFeed() {
         }
       }
       
-      const sf = document.getElementById('feedSessionFilter')?.value || 'all';
-      const rf = document.getElementById('feedRoleFilter')?.value || 'all';
+      const sfEl = document.getElementById('feedSessionFilter');
+      const rfEl = document.getElementById('feedRoleFilter');
+      const sf = sfEl ? sfEl.value : 'all';
+      const rf = rfEl ? rfEl.value : 'all';
       const visible = (sf === 'all' || sf === sessionName) && (rf === 'all' || rf === roleClass);
 
       const time = new Date(data.timestamp).toLocaleTimeString('en', { 
@@ -4517,10 +4531,15 @@ function sendNotification(title, body) {
 
 // Feed search
 let feedSearchTerm = '';
-document.getElementById('feedSearchInput')?.addEventListener('input', (e) => {
-  feedSearchTerm = e.target.value.toLowerCase();
-  applyFeedFilter();
-});
+{
+  const feedSearchInputEl = document.getElementById('feedSearchInput');
+  if (feedSearchInputEl) {
+    feedSearchInputEl.addEventListener('input', (e) => {
+      feedSearchTerm = e.target.value.toLowerCase();
+      applyFeedFilter();
+    });
+  }
+}
 
 function clearFeedSearch() {
   document.getElementById('feedSearchInput').value = '';
@@ -4728,8 +4747,9 @@ async function quickAction(action, evt) {
     'restart-claude': '🤖 Restarting...'
   };
 
-  const triggerBtn = evt?.target?.closest?.('.qa-btn') || evt?.target;
-  const origText = triggerBtn?.textContent || '';
+  const evtTarget = evt && evt.target ? evt.target : null;
+  const triggerBtn = (evtTarget && typeof evtTarget.closest === 'function' ? evtTarget.closest('.qa-btn') : null) || evtTarget;
+  const origText = triggerBtn && triggerBtn.textContent ? triggerBtn.textContent : '';
   if (triggerBtn) { triggerBtn.textContent = loadingLabels[action] || '⏳ Working...'; triggerBtn.disabled = true; triggerBtn.style.opacity = '0.6'; triggerBtn.style.pointerEvents = 'none'; }
 
   try {

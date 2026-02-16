@@ -1304,6 +1304,10 @@ setInterval(() => {
 const server = http.createServer((req, res) => {
   if (!httpsEnforcement(req, res)) return;
   setSecurityHeaders(res);
+  // Prevent mobile Safari from serving stale dashboard/API responses.
+  res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
+  res.setHeader('Pragma', 'no-cache');
+  res.setHeader('Expires', '0');
   const ip = getClientIP(req);
 
   if (req.method === 'OPTIONS') {
