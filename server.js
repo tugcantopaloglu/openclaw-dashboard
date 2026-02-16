@@ -40,6 +40,39 @@ function getGitRepos() {
   return repos;
 }
 
+function getAllSessionDirs() {
+  const dirs = new Set();
+  if (fs.existsSync(sessDir)) dirs.add(sessDir);
+  try {
+    const agentsDir = path.join(OPENCLAW_DIR, 'agents');
+    if (fs.existsSync(agentsDir)) {
+      fs.readdirSync(agentsDir).forEach(agent => {
+        const candidate = path.join(agentsDir, agent, 'sessions');
+        if (fs.existsSync(candidate)) dirs.add(candidate);
+      });
+    }
+  } catch {}
+  return Array.from(dirs);
+}
+
+function getSessionJsonlFiles() {
+  const files = [];
+  getAllSessionDirs().forEach(dir => {
+    try {
+      const agent = path.basename(path.dirname(dir));
+      fs.readdirSync(dir)
+        .filter(name => name.endsWith('.jsonl'))
+        .forEach(name => {
+          const fullPath = path.join(dir, name);
+          let mtimeMs = 0;
+          try { mtimeMs = fs.statSync(fullPath).mtimeMs; } catch {}
+          files.push({ dir, agent, name, fullPath, mtimeMs });
+        });
+    } catch {}
+  });
+  return files;
+}
+
 function resolveName(key) {
   if (key.includes(':main:main')) return 'main';
   if (key.includes('teleg')) return 'telegram-group';
@@ -503,30 +536,152 @@ function getSystemStats() {
   }
 }
 
+function tailTextLines(text, lineCount) {
+  if (!text) return [];
+  const lines = text.split('\n');
+  if (lines.length && lines[lines.length - 1] === '') lines.pop();
+  return lines.slice(-lineCount);
+}
+
+function readJournalUnit(unit, lines, userScope = false) {
+  const { execSync } = require('child_process');
+  const userFlag = userScope ? '--user ' : '';
+  try {
+    return execSync(`journalctl ${userFlag}-u ${unit} --no-pager -n ${lines} -o short 2>/dev/null || true`, {
+      encoding: 'utf8',
+      timeout: 10000
+    }).trim();
+  } catch {
+    return '';
+  }
+}
+
+function normalizeJournalText(text) {
+  const cleaned = (text || '')
+    .split('\n')
+    .map(line => line.trimEnd())
+    .filter(line => line && line !== '-- No entries --')
+    .join('\n')
+    .trim();
+  return cleaned;
+}
+
+function readOpenClawFileLogs(lines) {
+  try {
+    const logsDir = path.join(OPENCLAW_DIR, 'logs');
+    if (!fs.existsSync(logsDir)) return '';
+    const files = fs.readdirSync(logsDir)
+      .filter(f => /\.(jsonl|log|txt)$/i.test(f))
+      .map(name => {
+        const fullPath = path.join(logsDir, name);
+        let mtimeMs = 0;
+        try { mtimeMs = fs.statSync(fullPath).mtimeMs; } catch {}
+        return { name, fullPath, mtimeMs };
+      })
+      .sort((a, b) => b.mtimeMs - a.mtimeMs)
+      .slice(0, 3);
+
+    if (files.length === 0) return '';
+
+    const perFileLines = Math.max(20, Math.ceil(lines / files.length));
+    const sections = [];
+
+    files.forEach(file => {
+      try {
+        const text = fs.readFileSync(file.fullPath, 'utf8');
+        const tail = tailTextLines(text, perFileLines);
+        if (tail.length === 0) return;
+        sections.push(`===== ${file.name} =====\n${tail.join('\n')}`);
+      } catch {}
+    });
+
+    return sections.join('\n\n').trim();
+  } catch {
+    return '';
+  }
+}
+
+function readOpenClawSessionLogs(lines) {
+  try {
+    const files = getSessionJsonlFiles()
+      .sort((a, b) => b.mtimeMs - a.mtimeMs)
+      .slice(0, 5);
+
+    if (files.length === 0) return '';
+
+    const perFileLines = Math.max(20, Math.ceil(lines / files.length));
+    const sections = [];
+
+    files.forEach(file => {
+      try {
+        const text = fs.readFileSync(file.fullPath, 'utf8');
+        const tail = tailTextLines(text, perFileLines);
+        if (tail.length === 0) return;
+        sections.push(`===== ${file.agent}/sessions/${file.name} =====\n${tail.join('\n')}`);
+      } catch {}
+    });
+
+    return sections.join('\n\n').trim();
+  } catch {
+    return '';
+  }
+}
+
+function getServiceLogs(service, lines) {
+  const units = service === 'openclaw'
+    ? ['openclaw', 'openclaw-gateway', 'openclaw-webhooks']
+    : [service];
+  const perUnitLines = Math.max(20, Math.ceil(lines / units.length));
+  const sections = [];
+
+  units.forEach(unit => {
+    const systemLogs = normalizeJournalText(readJournalUnit(unit, perUnitLines, false));
+    const userLogs = normalizeJournalText(readJournalUnit(unit, perUnitLines, true));
+    const combined = [systemLogs, userLogs].filter(Boolean).join('\n').trim();
+    if (combined) {
+      sections.push(`===== ${unit} =====\n${combined}`);
+    }
+  });
+
+  if (sections.length > 0) return sections.join('\n\n');
+
+  if (service === 'openclaw') {
+    const sessionLogs = readOpenClawSessionLogs(lines);
+    if (sessionLogs) return sessionLogs;
+
+    const fileLogs = readOpenClawFileLogs(lines);
+    if (fileLogs) return fileLogs;
+  }
+
+  return '';
+}
+
 let liveClients = [];
 let liveWatcher = null;
+const _sessionDirWatchers = {};
 const _fileWatchers = {};
 const _fileSizes = {};
 
-function watchSessionFile(file) {
-  const filePath = path.join(sessDir, file);
-  const sessionKey = file.replace('.jsonl', '');
-  if (_fileWatchers[file]) return;
+function watchSessionFile(filePath, agent = null) {
+  const base = path.basename(filePath);
+  const sessionKeyRaw = base.replace('.jsonl', '');
+  const sessionKey = agent ? `${agent}:${sessionKeyRaw}` : sessionKeyRaw;
+  if (_fileWatchers[filePath]) return;
   try {
-    _fileSizes[file] = fs.statSync(filePath).size;
-  } catch { _fileSizes[file] = 0; }
+    _fileSizes[filePath] = fs.statSync(filePath).size;
+  } catch { _fileSizes[filePath] = 0; }
   
   try {
-    _fileWatchers[file] = fs.watch(filePath, (eventType) => {
+    _fileWatchers[filePath] = fs.watch(filePath, (eventType) => {
       if (eventType !== 'change') return;
       try {
         const stats = fs.statSync(filePath);
-        if (stats.size <= (_fileSizes[file] || 0)) return;
+        if (stats.size <= (_fileSizes[filePath] || 0)) return;
         const fd = fs.openSync(filePath, 'r');
-        const buffer = Buffer.allocUnsafe(stats.size - (_fileSizes[file] || 0));
-        fs.readSync(fd, buffer, 0, buffer.length, _fileSizes[file] || 0);
+        const buffer = Buffer.allocUnsafe(stats.size - (_fileSizes[filePath] || 0));
+        fs.readSync(fd, buffer, 0, buffer.length, _fileSizes[filePath] || 0);
         fs.closeSync(fd);
-        _fileSizes[file] = stats.size;
+        _fileSizes[filePath] = stats.size;
         buffer.toString('utf8').split('\n').filter(l => l.trim()).forEach(line => {
           try { const data = JSON.parse(line); data._sessionKey = sessionKey; broadcastLiveEvent(data); } catch {}
         });
@@ -538,14 +693,25 @@ function watchSessionFile(file) {
 function startLiveWatcher() {
   if (liveWatcher) return;
   try {
-    // Watch existing files
-    fs.readdirSync(sessDir).filter(f => f.endsWith('.jsonl')).forEach(watchSessionFile);
-    // Watch directory for new session files
-    liveWatcher = fs.watch(sessDir, (eventType, filename) => {
-      if (filename && filename.endsWith('.jsonl') && !_fileWatchers[filename]) {
-        try { if (fs.existsSync(path.join(sessDir, filename))) watchSessionFile(filename); } catch {}
-      }
+    const sessionDirs = getAllSessionDirs();
+
+    // Watch existing files across all session dirs.
+    getSessionJsonlFiles().forEach(file => watchSessionFile(file.fullPath, file.agent));
+
+    // Keep a watcher per session directory for new files.
+    sessionDirs.forEach(dir => {
+      const agent = path.basename(path.dirname(dir));
+      if (_sessionDirWatchers[dir]) return;
+      _sessionDirWatchers[dir] = fs.watch(dir, (eventType, filename) => {
+        if (!filename || !filename.endsWith('.jsonl')) return;
+        const fullPath = path.join(dir, filename);
+        if (_fileWatchers[fullPath]) return;
+        try { if (fs.existsSync(fullPath)) watchSessionFile(fullPath, agent); } catch {}
+      });
     });
+
+    // Keep compatibility for existing lifecycle checks.
+    liveWatcher = { close: () => {} };
   } catch {}
 }
 
@@ -566,9 +732,10 @@ function broadcastLiveEvent(data) {
 function formatLiveEvent(data) {
   const timestamp = data.timestamp || new Date().toISOString();
   const sessionKey = data._sessionKey || data.sessionId || 'unknown';
+  const lookupKey = sessionKey.includes(':') ? sessionKey.split(':').pop() : sessionKey;
   
   const sessions = getSessionsJson();
-  const session = sessions.find(s => s.sessionId === sessionKey || s.key.includes(sessionKey));
+  const session = sessions.find(s => s.sessionId === lookupKey || s.key.includes(lookupKey));
   const label = session ? session.label : sessionKey.substring(0, 8);
   
   if (data.type === 'message') {
@@ -675,13 +842,33 @@ function getGitActivity() {
 }
 
 function getServicesStatus() {
-  const { execSync } = require('child_process');
+  const { execFileSync } = require('child_process');
   const services = ['openclaw', 'agent-dashboard', 'tailscaled'];
   return services.map(name => {
     try {
-      const status = execSync(`systemctl is-active ${name} 2>/dev/null`, { encoding: 'utf8', timeout: 3000 }).trim();
-      return { name, active: status === 'active' };
-    } catch { return { name, active: false }; }
+      const status = execFileSync('systemctl', ['is-active', name], { encoding: 'utf8', timeout: 3000, stdio: ['ignore', 'pipe', 'ignore'] }).trim();
+      if (status === 'active') return { name, active: true };
+    } catch {}
+
+    // Fallback for services started outside systemd (common in dev/self-hosted setups).
+    try {
+      let args = ['-fa', name];
+      if (name === 'openclaw') args = ['-x', 'openclaw'];
+      if (name === 'agent-dashboard') args = ['-fa', 'server.js'];
+      const proc = execFileSync('pgrep', args, { encoding: 'utf8', timeout: 3000, stdio: ['ignore', 'pipe', 'ignore'] }).trim();
+      if (proc) return { name, active: true };
+      if (name === 'openclaw') {
+        const aux = execFileSync('pgrep', ['-x', 'openclaw-gateway'], { encoding: 'utf8', timeout: 3000, stdio: ['ignore', 'pipe', 'ignore'] }).trim();
+        if (aux) return { name, active: true };
+      }
+      if (name === 'openclaw') {
+        const aux = execFileSync('pgrep', ['-x', 'openclaw-webhooks'], { encoding: 'utf8', timeout: 3000, stdio: ['ignore', 'pipe', 'ignore'] }).trim();
+        if (aux) return { name, active: true };
+      }
+      return { name, active: false };
+    } catch {
+      return { name, active: false };
+    }
   });
 }
 
@@ -828,6 +1015,12 @@ setInterval(saveHealthSnapshot, 5 * 60 * 1000);
 saveHealthSnapshot(); // Initial snapshot
 
 const server = http.createServer((req, res) => {
+  // iOS Safari can aggressively reuse cached XHR/fetch responses.
+  // Force fresh reads for dashboard pages and API payloads.
+  res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
+  res.setHeader('Pragma', 'no-cache');
+  res.setHeader('Expires', '0');
+
   if (req.url === '/api/sessions') {
     res.writeHead(200, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
     res.end(JSON.stringify(getSessionsJson()));
@@ -959,7 +1152,7 @@ const server = http.createServer((req, res) => {
     res.end(JSON.stringify({ avgSeconds: getAvgResponseTime() }));
     return;
   }
-  if (req.url.startsWith('/api/logs?')) {
+  if (req.url.startsWith('/api/logs')) {
     try {
       const params = new URL(req.url, 'http://localhost').searchParams;
       const allowedServices = ['openclaw', 'agent-dashboard', 'tailscaled', 'sshd', 'nginx'];
@@ -970,10 +1163,12 @@ const server = http.createServer((req, res) => {
         return;
       }
       const lines = Math.min(Math.max(parseInt(params.get('lines')) || 100, 1), 1000);
-      const { execSync } = require('child_process');
-      const logs = execSync(`journalctl -u ${service} --no-pager -n ${lines} -o short 2>/dev/null || echo "No logs available"`, { encoding: 'utf8', timeout: 10000 });
+      const logs = getServiceLogs(service, lines);
+      const renderedLogs = logs && logs.trim()
+        ? logs
+        : `No logs found for service "${service}".`;
       res.writeHead(200, { 'Content-Type': 'text/plain', 'Access-Control-Allow-Origin': '*' });
-      res.end(logs);
+      res.end(renderedLogs);
     } catch (e) {
       res.writeHead(500, { 'Content-Type': 'text/plain' });
       res.end('Error fetching logs');
@@ -1240,14 +1435,11 @@ const server = http.createServer((req, res) => {
     try {
       // Only backfill from recently modified sessions (last 1h)
       const cutoff = Date.now() - 3600000;
-      const files = fs.readdirSync(sessDir).filter(f => {
-        if (!f.endsWith('.jsonl')) return false;
-        try { return fs.statSync(path.join(sessDir, f)).mtimeMs > cutoff; } catch { return false; }
-      });
+      const files = getSessionJsonlFiles().filter(file => file.mtimeMs > cutoff);
       const recentEvents = [];
       files.forEach(file => {
-        const sessionKey = file.replace('.jsonl', '');
-        const content = fs.readFileSync(path.join(sessDir, file), 'utf8');
+        const sessionKey = `${file.agent}:${file.name.replace('.jsonl', '')}`;
+        const content = fs.readFileSync(file.fullPath, 'utf8');
         const lines = content.split('\n').filter(l => l.trim());
         lines.slice(-5).forEach(line => {
           try {
@@ -1268,7 +1460,8 @@ const server = http.createServer((req, res) => {
       liveClients = liveClients.filter(client => client !== res);
       if (liveClients.length === 0) {
         if (liveWatcher) { try { liveWatcher.close(); } catch {} liveWatcher = null; }
-        Object.keys(_fileWatchers).forEach(k => { try { _fileWatchers[k].close(); } catch {} delete _fileWatchers[k]; });
+        Object.keys(_sessionDirWatchers).forEach(k => { try { _sessionDirWatchers[k].close(); } catch {} delete _sessionDirWatchers[k]; });
+        Object.keys(_fileWatchers).forEach(k => { try { _fileWatchers[k].close(); } catch {} delete _fileWatchers[k]; delete _fileSizes[k]; });
       }
     });
     

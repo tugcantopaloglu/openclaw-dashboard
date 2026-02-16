@@ -1166,7 +1166,6 @@ body {
 </style>
 </head>
 <body>
-
 <div class="app">
   <aside class="sidebar">
     <div class="sidebar-header">
@@ -1712,12 +1711,12 @@ body {
           <input type="text" id="feedSearchInput" placeholder="🔍 Search feed..." style="width:100%;padding:4px 28px 4px 8px;background:var(--bg-secondary);color:var(--text-primary);border:1px solid var(--border);border-radius:6px;font-size:12px;">
           <button onclick="clearFeedSearch()" style="position:absolute;right:4px;top:50%;transform:translateY(-50%);background:none;border:none;color:var(--text-muted);cursor:pointer;font-size:14px;padding:2px 6px;">✕</button>
         </div>
-        <button class="pause-btn" id="pauseBtn">▶ Start</button>
+        <button class="pause-btn" id="pauseBtn">⏸ Pause</button>
         <button onclick="document.getElementById('feedStream').innerHTML=''" style="background:var(--bg-secondary);color:var(--text-secondary);border:1px solid var(--border);border-radius:6px;padding:4px 10px;font-size:12px;cursor:pointer;">Clear</button>
       </div>
 
       <div class="card">
-        <div class="feed-stream" id="feedStream"><div style="text-align:center;padding:40px;color:var(--text-muted);font-size:14px;">Click <b>▶ Start</b> to begin streaming</div></div>
+        <div class="feed-stream" id="feedStream"><div data-placeholder style="text-align:center;padding:40px;color:var(--text-muted);font-size:14px;">Open Live Feed to auto-connect...</div></div>
       </div>
     </div>
 
@@ -1830,11 +1829,85 @@ body {
 </div>
 
 <script>
+// Legacy iOS fallback loader (separate script block so it can still run
+// even if the main dashboard script hits a parse/runtime issue).
+(function () {
+  function byId(id) { return document.getElementById(id); }
+  function setText(id, value) {
+    var el = byId(id);
+    if (el) el.textContent = value;
+  }
+  function setCurrency(id, value) {
+    var el = byId(id);
+    if (el) el.textContent = '$' + (Number(value || 0).toFixed(2));
+  }
+  function getJSON(url, cb) {
+    var xhr = new XMLHttpRequest();
+    xhr.open('GET', url, true);
+    xhr.onreadystatechange = function () {
+      if (xhr.readyState !== 4) return;
+      if (xhr.status >= 200 && xhr.status < 300) {
+        try { cb(null, JSON.parse(xhr.responseText)); }
+        catch (e) { cb(e); }
+      } else {
+        cb(new Error('HTTP ' + xhr.status));
+      }
+    };
+    xhr.send();
+  }
+
+  function hydrateCoreStats() {
+    getJSON('/api/sessions', function (err, sessions) {
+      if (err || !sessions || !sessions.length) return;
+      var now = Date.now();
+      var running = 0;
+      var totalTokens = 0;
+      var totalCost = 0;
+      for (var i = 0; i < sessions.length; i++) {
+        var s = sessions[i] || {};
+        var updatedAt = Number(s.updatedAt || 0);
+        if (now - updatedAt < 300000 && !s.aborted) running++;
+        totalTokens += Number(s.totalTokens || 0);
+        totalCost += Number(s.cost || 0);
+      }
+      setText('runningAgents', String(running));
+      setText('totalSessions', String(sessions.length));
+      setText('activeSessions', String(running));
+      setText('statsSessionCount', String(sessions.length));
+      setText('statsTotalTokens', totalTokens >= 1000000 ? (totalTokens / 1000000).toFixed(1) + 'M' : (totalTokens >= 1000 ? Math.round(totalTokens / 1000) + 'k' : String(totalTokens)));
+      setText('statsTotalCost', '$' + totalCost.toFixed(2));
+    });
+
+    getJSON('/api/costs', function (err, costs) {
+      if (err || !costs) return;
+      setCurrency('todaySpend', costs.today || 0);
+      setCurrency('costToday', costs.today || 0);
+      setCurrency('costWeek', costs.week || 0);
+      setCurrency('costTotal', costs.total || 0);
+    });
+
+    getJSON('/api/system', function (err, sys) {
+      if (err || !sys) return;
+      setText('systemCpu', String((sys.cpu && sys.cpu.usage) || 0) + '%');
+      setText('systemRam', String((sys.memory && sys.memory.percent) || 0) + '%');
+      setText('systemDisk', String((sys.disk && sys.disk.percent) || 0) + '%');
+    });
+  }
+
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', hydrateCoreStats);
+  } else {
+    hydrateCoreStats();
+  }
+  setInterval(hydrateCoreStats, 5000);
+})();
+</script>
+<script>
 let sessions = [];
 let costs = {};
 let usage = {};
 let systemStats = {};
-let feedPaused = true;
+let feedPaused = false;
 let liveEventSource = null;
 let sortBy = 'updated';
 let sortDir = 'desc';
@@ -1850,7 +1923,19 @@ document.querySelectorAll('.nav-item').forEach(item => {
     document.getElementById(page).classList.add('active');
     
     if (page === 'feed') {
-      // Don't auto-connect; user clicks Start
+      const feed = document.getElementById('feedStream');
+      if (!liveEventSource) {
+        if (feed) {
+          feed.innerHTML = '<div data-placeholder style="text-align:center;padding:24px;color:var(--text-muted);">Connecting to live stream...</div>';
+        }
+        feedPaused = false;
+        connectLiveFeed();
+      }
+      const pauseBtn = document.getElementById('pauseBtn');
+      if (pauseBtn) {
+        pauseBtn.textContent = '⏸ Pause';
+        pauseBtn.disabled = false;
+      }
     } else if (liveEventSource) {
       liveEventSource.close();
       liveEventSource = null;
@@ -1858,6 +1943,9 @@ document.querySelectorAll('.nav-item').forEach(item => {
     
     if (page === 'memory') {
       fetchMemoryFiles();
+    }
+    if (page === 'logs') {
+      fetchLogs();
     }
   });
 });
@@ -1872,21 +1960,28 @@ document.querySelectorAll('.view-all-link').forEach(link => {
 
 async function fetchData() {
   try {
-    // Fast path: load sessions, costs, system first
-    const [sessRes, costsRes, sysRes] = await Promise.all([
-      fetch('/api/sessions'),
-      fetch('/api/costs'),
-      fetch('/api/system')
+    const fetchJsonNoCache = async (url) => {
+      const res = await fetch(url, { cache: 'no-store' });
+      if (!res.ok) throw new Error(`${url} -> HTTP ${res.status}`);
+      return res.json();
+    };
+
+    // iOS-safe partial-failure tolerance (avoid Promise.allSettled compatibility issues).
+    const safeFetch = (url, fallback) => fetchJsonNoCache(url).catch(() => fallback);
+    const [sess, cst, sys] = await Promise.all([
+      safeFetch('/api/sessions', sessions),
+      safeFetch('/api/costs', costs),
+      safeFetch('/api/system', systemStats)
     ]);
-    
-    sessions = await sessRes.json();
-    costs = await costsRes.json();
-    systemStats = await sysRes.json();
+
+    sessions = Array.isArray(sess) ? sess : sessions;
+    costs = cst && typeof cst === 'object' ? cst : costs;
+    systemStats = sys && typeof sys === 'object' ? sys : systemStats;
     
     updateDashboard();
     
     // Then load usage async (slower endpoint)
-    fetch('/api/usage').then(r => r.json()).then(u => {
+    fetchJsonNoCache('/api/usage').then(u => {
       usage = u;
       try { updateDashboard(); } catch {}
     }).catch(() => {});
@@ -1959,7 +2054,7 @@ function updateOverview() {
   todayEl.dataset.format = 'currency';
   animateValue(todayEl, costs.today || 0);
   
-  const opusLimitsKey = Object.keys(usage.fiveHour?.perModel || {}).find(k => k.includes('opus')) || '';
+  const opusLimitsKey = Object.keys((usage.fiveHour && usage.fiveHour.perModel) || {}).find(k => k.includes('opus')) || '';
   // Overview usage card: 5h session only
   try {
     const cuRes = _cachedClaudeUsage;
@@ -1969,7 +2064,7 @@ function updateOverview() {
       sPct = cu.session.percent;
     } else {
       const opusDataOv = opusLimitsKey ? usage.fiveHour.perModel[opusLimitsKey] : { output: 0 };
-      const opusLimit = usage.estimatedLimits?.opus || 88000;
+      const opusLimit = (usage.estimatedLimits && usage.estimatedLimits.opus) || 88000;
       sPct = Math.min(Math.round((opusDataOv.output / opusLimit) * 100), 100);
     }
     const sEl = document.getElementById('ovSessionPct');
@@ -1995,7 +2090,7 @@ function updateOverview() {
     document.getElementById('systemCpu').textContent = cpuPct + '%';
     updateRadialGauge('cpuCircle', cpuPct);
     
-    const ramPct = systemStats.memory?.percent || 0;
+    const ramPct = (systemStats.memory && systemStats.memory.percent) || 0;
     document.getElementById('systemRam').textContent = ramPct + '%';
     updateRadialGauge('ramCircle', ramPct);
     const ramDetail = document.getElementById('systemRamDetail');
@@ -2476,11 +2571,11 @@ async function scrapeClaudeUsage() {
   try {
     await fetch('/api/claude-usage-scrape', { method: 'POST' });
     // Poll until data changes or timeout
-    const oldTs = _cachedClaudeUsage?.scraped_at || '';
+    const oldTs = (_cachedClaudeUsage && _cachedClaudeUsage.scraped_at) || '';
     for (let i = 0; i < 12; i++) {
       await new Promise(r => setTimeout(r, 2000));
       await fetchClaudeUsage();
-      if (_cachedClaudeUsage?.scraped_at && _cachedClaudeUsage.scraped_at !== oldTs) break;
+      if (_cachedClaudeUsage && _cachedClaudeUsage.scraped_at && _cachedClaudeUsage.scraped_at !== oldTs) break;
     }
     showToast('Usage data refreshed', 'success');
     if (typeof updateDashboard === 'function') updateDashboard();
@@ -2510,7 +2605,7 @@ function formatMs(ms) {
 
 function updateLimits() {
   const limits = usage.estimatedLimits || { opus: 88000, sonnet: 220000 };
-  const models = usage.fiveHour?.perModel || {};
+  const models = (usage.fiveHour && usage.fiveHour.perModel) || {};
 
   const opusKey = Object.keys(models).find(k => k.includes('opus')) || '';
   const sonnetKey = Object.keys(models).find(k => k.includes('sonnet')) || '';
@@ -2568,9 +2663,9 @@ function updateLimits() {
     }
   }
 
-  const resetIn = usage.fiveHour?.windowResetIn || 0;
+  const resetIn = (usage.fiveHour && usage.fiveHour.windowResetIn) || 0;
   document.getElementById('windowResetValue').textContent = resetIn > 0 ? formatMs(resetIn) : 'No window';
-  document.getElementById('windowResetSub').textContent = usage.fiveHour?.windowStart ? 'Since ' + new Date(usage.fiveHour.windowStart).toLocaleTimeString('en', {hour:'2-digit',minute:'2-digit'}) : '';
+  document.getElementById('windowResetSub').textContent = (usage.fiveHour && usage.fiveHour.windowStart) ? 'Since ' + new Date(usage.fiveHour.windowStart).toLocaleTimeString('en', {hour:'2-digit',minute:'2-digit'}) : '';
 
   const pricing = {
     opus: { input: 15, output: 75, cache: 1.875 },
@@ -2603,7 +2698,7 @@ function updateLimits() {
 
   document.getElementById('windowBreakdown').innerHTML = windowHtml || '<div class="empty-state-text">No data</div>';
 
-  const recentCalls = usage.fiveHour?.recentCalls || [];
+  const recentCalls = (usage.fiveHour && usage.fiveHour.recentCalls) || [];
   const callsHtml = recentCalls.slice(0, 15).map(call => {
     const shortModel = call.model.split('/').pop();
     return `
@@ -2886,8 +2981,10 @@ function connectLiveFeed() {
         }
       }
       
-      const sf = document.getElementById('feedSessionFilter')?.value || 'all';
-      const rf = document.getElementById('feedRoleFilter')?.value || 'all';
+      const sfEl = document.getElementById('feedSessionFilter');
+      const rfEl = document.getElementById('feedRoleFilter');
+      const sf = sfEl ? sfEl.value : 'all';
+      const rf = rfEl ? rfEl.value : 'all';
       const visible = (sf === 'all' || sf === sessionName) && (rf === 'all' || rf === roleClass);
 
       const time = new Date(data.timestamp).toLocaleTimeString('en', { 
@@ -2964,7 +3061,7 @@ let healthHistory = [];
 
 async function fetchHealthHistory() {
   try {
-    const res = await fetch('/api/health-history');
+    const res = await fetch('/api/health-history', { cache: 'no-store' });
     healthHistory = await res.json();
     renderHealthSparklines();
   } catch {}
@@ -2997,20 +3094,26 @@ function renderHealthSparklines() {
 
 async function fetchNewData() {
   try {
+    const fetchJsonNoCache = async (url) => {
+      const res = await fetch(url, { cache: 'no-store' });
+      if (!res.ok) throw new Error(`${url} -> HTTP ${res.status}`);
+      return res.json();
+    };
+
     const [cronsRes, gitRes, svcRes, memRes, tokRes, rtRes] = await Promise.all([
-      fetch('/api/crons'),
-      fetch('/api/git'),
-      fetch('/api/services'),
-      fetch('/api/memory'),
-      fetch('/api/tokens-today'),
-      fetch('/api/response-time')
+      fetchJsonNoCache('/api/crons'),
+      fetchJsonNoCache('/api/git'),
+      fetchJsonNoCache('/api/services'),
+      fetchJsonNoCache('/api/memory'),
+      fetchJsonNoCache('/api/tokens-today'),
+      fetchJsonNoCache('/api/response-time')
     ]);
-    const crons = await cronsRes.json();
-    const git = await gitRes.json();
-    const services = await svcRes.json();
-    const memFiles = await memRes.json();
-    const tokens = await tokRes.json();
-    const rt = await rtRes.json();
+    const crons = cronsRes;
+    const git = gitRes;
+    const services = svcRes;
+    const memFiles = memRes;
+    const tokens = tokRes;
+    const rt = rtRes;
 
     document.getElementById('servicesStatus').innerHTML = services.map(s =>
       `<div style="display:flex;align-items:center;gap:10px;padding:12px 0;border-bottom:1px solid var(--border);">
@@ -3259,10 +3362,15 @@ function sendNotification(title, body) {
 
 // Feed search
 let feedSearchTerm = '';
-document.getElementById('feedSearchInput')?.addEventListener('input', (e) => {
-  feedSearchTerm = e.target.value.toLowerCase();
-  applyFeedFilter();
-});
+{
+  const feedSearchInputEl = document.getElementById('feedSearchInput');
+  if (feedSearchInputEl) {
+    feedSearchInputEl.addEventListener('input', (e) => {
+      feedSearchTerm = e.target.value.toLowerCase();
+      applyFeedFilter();
+    });
+  }
+}
 
 function clearFeedSearch() {
   document.getElementById('feedSearchInput').value = '';
@@ -3485,8 +3593,9 @@ async function quickAction(action, evt) {
     'restart-claude': '🤖 Restarting...'
   };
 
-  const triggerBtn = evt?.target?.closest?.('.qa-btn') || evt?.target;
-  const origText = triggerBtn?.textContent || '';
+  const evtTarget = evt && evt.target ? evt.target : null;
+  const triggerBtn = (evtTarget && typeof evtTarget.closest === 'function' ? evtTarget.closest('.qa-btn') : null) || evtTarget;
+  const origText = triggerBtn && triggerBtn.textContent ? triggerBtn.textContent : '';
   if (triggerBtn) { triggerBtn.textContent = loadingLabels[action] || '⏳ Working...'; triggerBtn.disabled = true; triggerBtn.style.opacity = '0.6'; triggerBtn.style.pointerEvents = 'none'; }
 
   try {
@@ -3667,7 +3776,9 @@ async function fetchLogs() {
   try {
     const res = await fetch(`/api/logs?service=${service}&lines=${lines}`);
     const logs = await res.text();
-    viewer.textContent = logs;
+    viewer.textContent = logs && logs.trim()
+      ? logs
+      : `No logs returned for "${service}".`;
     viewer.scrollTop = viewer.scrollHeight;
   } catch (e) {
     viewer.innerHTML = '<div style="color:var(--red);">Failed to load logs: ' + e.message + '</div>';
@@ -3692,6 +3803,13 @@ scrapeClaudeUsage = async function() {
   await origScrapeClaudeUsage();
   showToast('Usage data refreshed successfully', 'success');
 };
+
+{
+  const logServiceEl = document.getElementById('logService');
+  const logLinesEl = document.getElementById('logLines');
+  if (logServiceEl) logServiceEl.addEventListener('change', fetchLogs);
+  if (logLinesEl) logLinesEl.addEventListener('change', fetchLogs);
+}
 
 // Update document title with usage percentage
 function updatePageTitle() {
