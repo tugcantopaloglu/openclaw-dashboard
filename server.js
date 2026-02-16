@@ -16,9 +16,9 @@ const memoryDir = path.join(WORKSPACE_DIR, 'memory');
 const memoryMdPath = path.join(WORKSPACE_DIR, 'MEMORY.md');
 const heartbeatPath = path.join(WORKSPACE_DIR, 'HEARTBEAT.md');
 const healthHistoryFile = path.join(dataDir, 'health-history.json');
-const auditLogPath = '/root/clawd/data/audit.log';
-const credentialsFile = '/root/clawd/data/credentials.json';
-const mfaSecretFile = '/root/clawd/data/mfa-secret.txt';
+const auditLogPath = path.join(dataDir, 'audit.log');
+const credentialsFile = path.join(dataDir, 'credentials.json');
+const mfaSecretFile = path.join(dataDir, 'mfa-secret.txt');
 
 const skillsDir = path.join(WORKSPACE_DIR, 'skills');
 const configFiles = [
@@ -213,6 +213,10 @@ function setSameSiteCORS(req, res) {
   if (origin && origin.includes(host)) {
     res.setHeader('Access-Control-Allow-Origin', origin);
   } else if (!origin) {
+    const proto = req.socket.encrypted || req.headers['x-forwarded-proto'] === 'https' ? 'https' : 'http';
+    res.setHeader('Access-Control-Allow-Origin', `${proto}://${host}`);
+  } else {
+    // Origin exists but doesn't match host - allow it for same-site scenarios
     const proto = req.socket.encrypted || req.headers['x-forwarded-proto'] === 'https' ? 'https' : 'http';
     res.setHeader('Access-Control-Allow-Origin', `${proto}://${host}`);
   }
@@ -1338,6 +1342,7 @@ const server = http.createServer((req, res) => {
     req.on('data', chunk => { body += chunk; if (body.length > 2048) req.destroy(); });
     req.on('end', () => {
       try {
+        const ip = getClientIP(req);
         const { username, password } = JSON.parse(body);
         if (!username || !password) {
           res.writeHead(400, { 'Content-Type': 'application/json' });
@@ -1363,6 +1368,7 @@ const server = http.createServer((req, res) => {
         res.writeHead(200, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ success: true, sessionToken }));
       } catch (e) {
+        console.error('Registration error:', e);
         res.writeHead(400, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ error: 'Bad request' }));
       }
