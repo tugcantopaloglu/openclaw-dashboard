@@ -5119,6 +5119,9 @@ function buildMissionList() {
     else if (run.status === 'running') attention = 2;
     else if (run.status === 'queued') attention = 1;
 
+    // Extract P-numbers from task text for project timestamp enrichment
+    const taskProjectIds = [...new Set((run.task || '').match(/\bP\d+\b/g) || [])];
+
     missions.push({
       id: 'af-' + run.id.slice(0, 8),
       fullId: run.id,
@@ -5131,6 +5134,7 @@ function buildMissionList() {
       attention,
       steps,
       context: run.context,
+      projectIds: taskProjectIds,
     });
   }
 
@@ -5251,10 +5255,21 @@ function buildMissionList() {
     });
   }
 
-  // Enrich projects with activity timestamps from threads
+  // Enrich projects with activity timestamps from threads and antfarm runs
   const projectTimestamps = {};
   for (const m of missions) {
     if (m.type === 'thread' && m.projectIds && m.updated) {
+      const t = new Date(m.updated).getTime();
+      for (const pid of m.projectIds) {
+        if (!projectTimestamps[pid] || t > projectTimestamps[pid]) {
+          projectTimestamps[pid] = t;
+        }
+      }
+    }
+  }
+  // Enrich from antfarm runs — workers reference projects in their task field
+  for (const m of missions) {
+    if (m.type === 'antfarm' && m.projectIds && m.projectIds.length > 0 && m.updated) {
       const t = new Date(m.updated).getTime();
       for (const pid of m.projectIds) {
         if (!projectTimestamps[pid] || t > projectTimestamps[pid]) {
