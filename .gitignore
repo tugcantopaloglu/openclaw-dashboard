@@ -41,3 +41,10 @@ MEMORY.md
 HEARTBEAT.md
 memory/
 sessions/
+
+# Presentation/pitch files (contain personal info)
+*.pptx
+*.pdf
+
+# Backup files
+*.bak

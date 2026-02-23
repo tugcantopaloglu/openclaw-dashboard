@@ -1,4 +1,5 @@
 const http = require('http');
+const crypto = require('crypto');
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
@@ -10,8 +11,11 @@ const OPENCLAW_DIR = process.env.OPENCLAW_DIR || path.join(os.homedir(), '.openc
 const WORKSPACE_DIR = process.env.WORKSPACE_DIR || process.env.OPENCLAW_WORKSPACE || process.cwd();
 const AGENT_ID = process.env.OPENCLAW_AGENT || 'main';
 const sessDir = path.join(OPENCLAW_DIR, 'agents', AGENT_ID, 'sessions');
+const claudeCliDir = path.join(os.homedir(), '.claude', 'projects');
 const cronFile = path.join(OPENCLAW_DIR, 'cron', 'jobs.json');
+const antfarmDbPath = path.join(OPENCLAW_DIR, 'antfarm', 'antfarm.db');
 const dataDir = path.join(WORKSPACE_DIR, 'data');
+const chatLogsDir = path.join(dataDir, 'chat-logs');
 const memoryDir = path.join(WORKSPACE_DIR, 'memory');
 const memoryMdPath = path.join(WORKSPACE_DIR, 'MEMORY.md');
 const heartbeatPath = path.join(WORKSPACE_DIR, 'HEARTBEAT.md');
@@ -20,6 +24,47 @@ const claudeUsageFile = path.join(dataDir, 'claude-usage.json');
 const scrapeScript = path.join(WORKSPACE_DIR, 'scripts', 'scrape-claude-usage.sh');
 
 const htmlPath = path.join(__dirname, 'index.html');
+const chatFile = path.join(dataDir, 'chat-messages.json');
+const chatCommandFile = path.join(dataDir, 'chat-command.txt');
+const CHAT_TOKEN = process.env.CHAT_TOKEN || '';
+const DOCBOT_TOKEN = process.env.DOCBOT_TOKEN || '';
+const TELEGRAM_CHAT_ID = process.env.TELEGRAM_CHAT_ID || '';
+const AUTH_PASSWORD = process.env.DASHBOARD_PASSWORD || '';
+const AUTH_ENABLED = process.env.DASHBOARD_AUTH !== 'false';
+const authSessions = new Map();
+
+function generateSessionToken() { return crypto.randomBytes(32).toString('hex'); }
+function parseCookies(cookieHeader) {
+  const cookies = {};
+  if (!cookieHeader) return cookies;
+  cookieHeader.split(';').forEach(c => { const [k, v] = c.trim().split('='); if (k && v) cookies[k] = v; });
+  return cookies;
+}
+function isAuthenticated(req) {
+  if (!AUTH_ENABLED) return true;
+  const cookies = parseCookies(req.headers.cookie);
+  const token = cookies['dash_session'];
+  if (token && authSessions.has(token)) {
+    const session = authSessions.get(token);
+    if (Date.now() - session.created < 7 * 86400000) return true;
+    authSessions.delete(token);
+  }
+  return false;
+}
+const loginPage = `<!DOCTYPE html><html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0"><title>Login - Dashboard</title>
+<style>*{margin:0;padding:0;box-sizing:border-box}body{font-family:'Inter',-apple-system,sans-serif;background:#0a0a0f;color:#e4e4e7;display:flex;align-items:center;justify-content:center;min-height:100vh}
+.login{background:#1f1f2e;border:1px solid #2a2a3a;border-radius:16px;padding:40px;width:90%;max-width:380px;text-align:center}
+h1{font-size:28px;margin-bottom:8px;background:linear-gradient(135deg,#e4e4e7,#6366f1);-webkit-background-clip:text;-webkit-text-fill-color:transparent}
+p{color:#a1a1aa;font-size:14px;margin-bottom:24px}
+input{width:100%;padding:12px 16px;background:#13131a;color:#e4e4e7;border:1px solid #2a2a3a;border-radius:12px;font-size:16px;outline:none;margin-bottom:16px}
+input:focus{border-color:#6366f1}
+button{width:100%;padding:12px;background:linear-gradient(135deg,#6366f1,#a855f7);color:white;border:none;border-radius:12px;font-size:16px;font-weight:600;cursor:pointer}
+button:hover{opacity:0.9}.error{color:#ef4444;font-size:13px;margin-bottom:12px;display:none}</style></head>
+<body><div class="login"><h1>OpenClaw</h1><p>Dashboard Login</p>
+<div class="error" id="err">Incorrect password</div>
+<form onsubmit="return doLogin(event)"><input type="password" id="pw" placeholder="Password" autofocus>
+<button type="submit">Login</button></form></div>
+<script>function doLogin(e){e.preventDefault();fetch('/api/auth/login',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({password:document.getElementById('pw').value})}).then(r=>r.json()).then(d=>{if(d.ok)location.reload();else{document.getElementById('err').style.display='block';document.getElementById('pw').value='';}}).catch(()=>document.getElementById('err').style.display='block');return false;}</script></body></html>`;
 
 // Ensure data directory exists
 try { fs.mkdirSync(dataDir, { recursive: true }); } catch {}
@@ -149,38 +194,115 @@ function getSessionsJson() {
   } catch (e) { return []; }
 }
 
-function getCostData() {
+// Pricing per 1M tokens (Claude API pricing)
+const MODEL_PRICING = {
+  opus:   { input: 15, output: 75, cache: 1.875 },
+  sonnet: { input: 3, output: 15, cache: 0.375 },
+  haiku:  { input: 0.25, output: 1.25, cache: 0.03 }
+};
+
+function getModelPricing(model) {
+  if (!model) return null;
+  const m = model.toLowerCase();
+  if (m.includes('opus')) return MODEL_PRICING.opus;
+  if (m.includes('sonnet')) return MODEL_PRICING.sonnet;
+  if (m.includes('haiku')) return MODEL_PRICING.haiku;
+  return null;
+}
+
+// Normalize usage fields from Claude CLI format (input_tokens) to dashboard format (input)
+function normalizeUsage(msg) {
+  const u = msg.usage;
+  if (!u) return null;
+  // Claude CLI format uses input_tokens/output_tokens/cache_read_input_tokens/cache_creation_input_tokens
+  // OpenClaw format uses input/output/cacheRead/cacheWrite
+  const input = u.input || u.input_tokens || 0;
+  const output = u.output || u.output_tokens || 0;
+  const cacheRead = u.cacheRead || u.cache_read_input_tokens || 0;
+  const cacheWrite = u.cacheWrite || u.cache_creation_input_tokens || 0;
+  // Cost: use explicit cost if available, otherwise estimate from tokens
+  let cost = 0;
+  if (u.cost && u.cost.total) {
+    cost = u.cost.total;
+  } else {
+    const pricing = getModelPricing(msg.model);
+    if (pricing) {
+      cost = (input / 1e6 * pricing.input) + (output / 1e6 * pricing.output) + ((cacheRead + cacheWrite) / 1e6 * pricing.cache);
+    }
+  }
+  return { input: input + cacheRead + cacheWrite, output, cost, cacheRead, cacheWrite, rawInput: input };
+}
+
+// Collect all JSONL session files from both OpenClaw and Claude CLI directories
+function getAllSessionFiles(maxAgeDays) {
+  const result = []; // { filePath, sessionId }
+  const cutoff = maxAgeDays ? Date.now() - maxAgeDays * 86400000 : 0;
+  // 1. OpenClaw sessions
   try {
     const files = fs.readdirSync(sessDir).filter(f => f.endsWith('.jsonl'));
+    for (const f of files) {
+      const fp = path.join(sessDir, f);
+      try {
+        if (cutoff && fs.statSync(fp).mtimeMs < cutoff) continue;
+        result.push({ filePath: fp, sessionId: f.replace('.jsonl', ''), source: 'openclaw' });
+      } catch {}
+    }
+  } catch {}
+  // 2. Claude CLI sessions (main project dirs, skip antfarm temp dirs for performance)
+  try {
+    const dirs = fs.readdirSync(claudeCliDir).filter(d => {
+      // Include main project dirs, skip tmp-antfarm-work dirs (too many, stale)
+      return !d.startsWith('-tmp-antfarm-work') && fs.statSync(path.join(claudeCliDir, d)).isDirectory();
+    });
+    for (const dir of dirs) {
+      const dirPath = path.join(claudeCliDir, dir);
+      try {
+        const files = fs.readdirSync(dirPath).filter(f => f.endsWith('.jsonl'));
+        for (const f of files) {
+          const fp = path.join(dirPath, f);
+          try {
+            if (cutoff && fs.statSync(fp).mtimeMs < cutoff) continue;
+            result.push({ filePath: fp, sessionId: f.replace('.jsonl', ''), source: 'claude-cli', project: dir });
+          } catch {}
+        }
+      } catch {}
+    }
+  } catch {}
+  return result;
+}
+
+function getCostData() {
+  try {
+    const sessionFiles = getAllSessionFiles(30); // last 30 days
     const perModel = {};
     const perDay = {};
     const perSession = {};
     let total = 0;
 
-    for (const file of files) {
-      const sid = file.replace('.jsonl', '');
+    for (const { filePath, sessionId } of sessionFiles) {
       let scost = 0;
-      const lines = fs.readFileSync(path.join(sessDir, file), 'utf8').split('\n');
+      const lines = fs.readFileSync(filePath, 'utf8').split('\n');
       for (const line of lines) {
         if (!line.trim()) continue;
         try {
           const d = JSON.parse(line);
-          if (d.type !== 'message') continue;
-          const msg = d.message;
-          if (!msg || !msg.usage || !msg.usage.cost) continue;
-          const c = msg.usage.cost.total || 0;
-          if (c <= 0) continue;
+          if (d.type !== 'message' && d.type !== 'assistant') continue;
+          const msg = d.message || d;
+          if (!msg || !msg.usage) continue;
           const model = msg.model || 'unknown';
           if (model.includes('delivery-mirror')) continue;
+          const norm = normalizeUsage(msg);
+          if (!norm || norm.cost <= 0) continue;
+          const c = norm.cost;
           const ts = d.timestamp || '';
           const day = ts.substring(0, 10);
           perModel[model] = (perModel[model] || 0) + c;
-          perDay[day] = (perDay[day] || 0) + c;
+          if (day) perDay[day] = (perDay[day] || 0) + c;
           scost += c;
           total += c;
         } catch {}
       }
-      if (scost > 0) perSession[sid] = scost;
+      if (scost > 0) perSession[sessionId] = scost;
     }
 
     const now = new Date();
@@ -267,48 +389,44 @@ function getUsageWindows() {
     const now = Date.now();
     const fiveHoursMs = 5 * 3600000;
     const oneWeekMs = 7 * 86400000;
-    // Only read files modified within the week window
-    const files = fs.readdirSync(sessDir).filter(f => {
-      if (!f.endsWith('.jsonl')) return false;
-      try { return fs.statSync(path.join(sessDir, f)).mtimeMs > now - oneWeekMs; } catch { return false; }
-    });
+    const sessionFiles = getAllSessionFiles(7); // last 7 days
 
     const perModel5h = {};
     const perModelWeek = {};
     const recentMessages = [];
 
-    for (const file of files) {
-      const lines = fs.readFileSync(path.join(sessDir, file), 'utf8').split('\n');
+    for (const { filePath } of sessionFiles) {
+      const lines = fs.readFileSync(filePath, 'utf8').split('\n');
       for (const line of lines) {
         if (!line.trim()) continue;
         try {
           const d = JSON.parse(line);
-          if (d.type !== 'message') continue;
-          const msg = d.message;
+          if (d.type !== 'message' && d.type !== 'assistant') continue;
+          const msg = d.message || d;
           if (!msg || !msg.usage) continue;
           const ts = d.timestamp ? new Date(d.timestamp).getTime() : 0;
           if (!ts) continue;
           const model = msg.model || 'unknown';
-          const inTok = (msg.usage.input || 0) + (msg.usage.cacheRead || 0) + (msg.usage.cacheWrite || 0);
-          const outTok = msg.usage.output || 0;
-          const cost = msg.usage.cost ? msg.usage.cost.total || 0 : 0;
+          if (model.includes('delivery-mirror')) continue;
+          const norm = normalizeUsage(msg);
+          if (!norm) continue;
 
           if (now - ts < fiveHoursMs) {
             if (!perModel5h[model]) perModel5h[model] = { input: 0, output: 0, cost: 0, calls: 0 };
-            perModel5h[model].input += inTok;
-            perModel5h[model].output += outTok;
-            perModel5h[model].cost += cost;
+            perModel5h[model].input += norm.input;
+            perModel5h[model].output += norm.output;
+            perModel5h[model].cost += norm.cost;
             perModel5h[model].calls++;
           }
           if (now - ts < oneWeekMs) {
             if (!perModelWeek[model]) perModelWeek[model] = { input: 0, output: 0, cost: 0, calls: 0 };
-            perModelWeek[model].input += inTok;
-            perModelWeek[model].output += outTok;
-            perModelWeek[model].cost += cost;
+            perModelWeek[model].input += norm.input;
+            perModelWeek[model].output += norm.output;
+            perModelWeek[model].cost += norm.cost;
             perModelWeek[model].calls++;
           }
           if (now - ts < fiveHoursMs) {
-            recentMessages.push({ ts, model, input: inTok, output: outTok, cost });
+            recentMessages.push({ ts, model, input: norm.input, output: norm.output, cost: norm.cost });
           }
         } catch {}
       }
@@ -346,21 +464,17 @@ function getUsageWindows() {
 
     const perModelCost5h = {};
     for (const [model, data] of Object.entries(perModel5h)) {
-      const isOpus = model.includes('opus');
-      const isSonnet = model.includes('sonnet');
-      let inputPrice = 0, outputPrice = 0, cachePrice = 0;
-      if (isOpus) { inputPrice = 15; outputPrice = 75; cachePrice = 1.875; }
-      else if (isSonnet) { inputPrice = 3; outputPrice = 15; cachePrice = 0.375; }
+      const pricing = getModelPricing(model);
       perModelCost5h[model] = {
-        inputCost: (data.input || 0) / 1000000 * inputPrice,
-        outputCost: (data.output || 0) / 1000000 * outputPrice,
+        inputCost: pricing ? (data.input || 0) / 1e6 * pricing.input : 0,
+        outputCost: pricing ? (data.output || 0) / 1e6 * pricing.output : 0,
         totalCost: data.cost || 0
       };
     }
 
     const totalCost5h = Object.values(perModel5h).reduce((s, m) => s + (m.cost || 0), 0);
     const totalCalls5h = Object.values(perModel5h).reduce((s, m) => s + (m.calls || 0), 0);
-    const costLimit = 35.0;
+    const costLimit = 500.0; // equivalent API cost budget per 5h window (informational)
     const messageLimit = 1000;
 
     return {
@@ -505,28 +619,34 @@ function getSystemStats() {
 
 let liveClients = [];
 let liveWatcher = null;
+let chatClients = [];
+
+function broadcastChatEvent(msg) {
+  if (chatClients.length === 0) return;
+  const data = `data: ${JSON.stringify(msg)}\n\n`;
+  chatClients.forEach(res => { try { res.write(data); } catch {} });
+}
 const _fileWatchers = {};
 const _fileSizes = {};
 
-function watchSessionFile(file) {
-  const filePath = path.join(sessDir, file);
-  const sessionKey = file.replace('.jsonl', '');
-  if (_fileWatchers[file]) return;
+function watchSessionFileByPath(filePath, sessionKey) {
+  const watchKey = filePath;
+  if (_fileWatchers[watchKey]) return;
   try {
-    _fileSizes[file] = fs.statSync(filePath).size;
-  } catch { _fileSizes[file] = 0; }
-  
+    _fileSizes[watchKey] = fs.statSync(filePath).size;
+  } catch { _fileSizes[watchKey] = 0; }
+
   try {
-    _fileWatchers[file] = fs.watch(filePath, (eventType) => {
+    _fileWatchers[watchKey] = fs.watch(filePath, (eventType) => {
       if (eventType !== 'change') return;
       try {
         const stats = fs.statSync(filePath);
-        if (stats.size <= (_fileSizes[file] || 0)) return;
+        if (stats.size <= (_fileSizes[watchKey] || 0)) return;
         const fd = fs.openSync(filePath, 'r');
-        const buffer = Buffer.allocUnsafe(stats.size - (_fileSizes[file] || 0));
-        fs.readSync(fd, buffer, 0, buffer.length, _fileSizes[file] || 0);
+        const buffer = Buffer.allocUnsafe(stats.size - (_fileSizes[watchKey] || 0));
+        fs.readSync(fd, buffer, 0, buffer.length, _fileSizes[watchKey] || 0);
         fs.closeSync(fd);
-        _fileSizes[file] = stats.size;
+        _fileSizes[watchKey] = stats.size;
         buffer.toString('utf8').split('\n').filter(l => l.trim()).forEach(line => {
           try { const data = JSON.parse(line); data._sessionKey = sessionKey; broadcastLiveEvent(data); } catch {}
         });
@@ -535,17 +655,41 @@ function watchSessionFile(file) {
   } catch {}
 }
 
+function watchSessionFile(file) {
+  watchSessionFileByPath(path.join(sessDir, file), file.replace('.jsonl', ''));
+}
+
 function startLiveWatcher() {
   if (liveWatcher) return;
   try {
-    // Watch existing files
+    // Watch OpenClaw session files
     fs.readdirSync(sessDir).filter(f => f.endsWith('.jsonl')).forEach(watchSessionFile);
-    // Watch directory for new session files
     liveWatcher = fs.watch(sessDir, (eventType, filename) => {
-      if (filename && filename.endsWith('.jsonl') && !_fileWatchers[filename]) {
+      if (filename && filename.endsWith('.jsonl') && !_fileWatchers[path.join(sessDir, filename)]) {
         try { if (fs.existsSync(path.join(sessDir, filename))) watchSessionFile(filename); } catch {}
       }
     });
+    // Watch Claude CLI session files (recently modified only)
+    const cutoff = Date.now() - 3600000; // last 1 hour
+    try {
+      const dirs = fs.readdirSync(claudeCliDir).filter(d => {
+        try { return !d.startsWith('-tmp-antfarm-work') && fs.statSync(path.join(claudeCliDir, d)).isDirectory(); } catch { return false; }
+      });
+      for (const dir of dirs) {
+        const dirPath = path.join(claudeCliDir, dir);
+        try {
+          const files = fs.readdirSync(dirPath).filter(f => f.endsWith('.jsonl'));
+          for (const f of files) {
+            const fp = path.join(dirPath, f);
+            try {
+              if (fs.statSync(fp).mtimeMs > cutoff) {
+                watchSessionFileByPath(fp, f.replace('.jsonl', ''));
+              }
+            } catch {}
+          }
+        } catch {}
+      }
+    } catch {}
   } catch {}
 }
 
@@ -571,8 +715,9 @@ function formatLiveEvent(data) {
   const session = sessions.find(s => s.sessionId === sessionKey || s.key.includes(sessionKey));
   const label = session ? session.label : sessionKey.substring(0, 8);
   
-  if (data.type === 'message') {
-    const msg = data.message;
+  // Handle both OpenClaw format (type:'message', data.message) and Claude CLI format (type:'assistant'/'user', data.message)
+  if (data.type === 'message' || data.type === 'assistant' || data.type === 'user') {
+    const msg = data.message || data;
     if (!msg) return null;
     
     const role = msg.role || 'unknown';
@@ -713,6 +858,155 @@ function getMemoryFiles() {
   return files;
 }
 
+// --- Docs browser (P9 dashboard enhancement) ---
+const DOCS_BASE = '/home/motobot';
+const DOCS_CATEGORIES = [
+  {
+    id: 'identity', label: 'Identity & Principles',
+    files: [
+      { path: '.openclaw/workspace/SOUL.md', label: 'SOUL.md' },
+      { path: '.openclaw/workspace/IDENTITY.md', label: 'IDENTITY.md' },
+      { path: '.openclaw/workspace/AGENTS.md', label: 'AGENTS.md' },
+      { path: 'claw-projects/principles.md', label: 'Principles' },
+      { path: '.openclaw/workspace/USER.md', label: 'USER.md' },
+      { path: '.openclaw/workspace/TOOLS.md', label: 'TOOLS.md' },
+    ]
+  },
+  {
+    id: 'projects', label: 'Projects & Tracking',
+    files: [
+      { path: 'claw-projects/IMPROVEMENT-PROJECTS.md', label: 'Projects' },
+      { path: 'claw-projects/insights-summary.md', label: 'Insights Summary' },
+      { path: '.openclaw/workspace/PLAN.md', label: 'Current Plan' },
+    ]
+  },
+  {
+    id: 'memory', label: 'Memory',
+    files: [
+      { path: '.openclaw/workspace/MEMORY.md', label: 'MEMORY.md' },
+      { path: '.openclaw/workspace/HEARTBEAT.md', label: 'HEARTBEAT.md' },
+    ]
+  },
+  {
+    id: 'decisions', label: 'Decisions',
+    dir: 'claw-projects/decisions', ext: '.md'
+  },
+  {
+    id: 'research', label: 'Research',
+    dir: 'claw-projects/research', ext: '.md'
+  },
+  {
+    id: 'specs-claw', label: 'Specs (Antfarm/Worker)',
+    dir: 'claw-projects/specs', ext: '.md', recursive: true
+  },
+  {
+    id: 'specs-openclaw-support', label: 'Specs (OpenClaw Stabilization)',
+    dir: 'ai-Projects/debugging-con-claude/specs/openclaw-support', ext: '.md'
+  },
+  {
+    id: 'specs-workspace', label: 'Specs (Workspace)',
+    dir: '.openclaw/workspace/specs', ext: '.md', recursive: true
+  },
+  {
+    id: 'specs-motobots', label: 'Specs (Motobots)',
+    dir: 'ai-Projects/motobots/specs', ext: '.md', recursive: true
+  },
+  {
+    id: 'specs-innova-mota', label: 'Innova Mota (P80)',
+    files: [
+      { path: '.openclaw/workspace/specs/p80-fermentia-generalize/research.md', label: 'P80 Research' },
+      { path: '.openclaw/workspace/specs/p80-fermentia-generalize/requirements.md', label: 'P80 Requirements' },
+      { path: '.openclaw/workspace/specs/p80-fermentia-generalize/design.md', label: 'P80 Design' },
+      { path: '.openclaw/workspace/specs/p80-fermentia-generalize/tasks.md', label: 'P80 Tasks' },
+      { path: '.openclaw/workspace/specs/p80-fermentia-generalize/.progress.md', label: 'P80 Progress' },
+      { path: '.openclaw/workspace/specs/geo-research-innova-mota.md', label: 'GEO Research (P85)' },
+      { path: 'claw-projects/research/p83-naming-research.md', label: 'Naming Research (P83)' },
+    ]
+  },
+  {
+    id: 'specs-fermentia-legacy', label: 'Specs (Fermentia v3-v5)',
+    dir: 'ai-Projects/sitio-web-lu-4/specs', ext: '.md', recursive: true
+  },
+  {
+    id: 'specs-genexus', label: 'Specs (CMS Genexus P70)',
+    dir: 'Downloads/CMSGeneXus/specs/new-genexus-com', ext: '.md'
+  },
+  {
+    id: 'specs-ralph', label: 'Specs (Ralph Dev)',
+    dir: 'ai-Projects/smart-ralph-main/specs', ext: '.md', recursive: true
+  },
+  {
+    id: 'viaje', label: 'Viaje Escocia & Inglaterra 2026',
+    dir: 'claw-projects/viaje-escocia-2026', ext: '.md'
+  },
+];
+
+function getDocsIndex() {
+  const categories = [];
+  for (const cat of DOCS_CATEGORIES) {
+    const items = [];
+    if (cat.files) {
+      for (const f of cat.files) {
+        const full = path.join(DOCS_BASE, f.path);
+        try {
+          if (fs.existsSync(full)) {
+            const stat = fs.statSync(full);
+            items.push({ name: f.label, path: f.path, modified: stat.mtimeMs, size: stat.size });
+          }
+        } catch {}
+      }
+    }
+    if (cat.dir) {
+      const dirFull = path.join(DOCS_BASE, cat.dir);
+      try {
+        if (fs.existsSync(dirFull)) {
+          if (cat.recursive) {
+            // Recursive: walk subdirectories, prefix file names with subfolder
+            const topEntries = fs.readdirSync(dirFull).sort();
+            for (const entry of topEntries) {
+              const entryPath = path.join(dirFull, entry);
+              const entryStat = fs.statSync(entryPath);
+              if (entryStat.isFile() && entry.endsWith(cat.ext || '.md') && !entry.startsWith('.')) {
+                items.push({ name: entry, path: cat.dir + '/' + entry, modified: entryStat.mtimeMs, size: entryStat.size });
+              } else if (entryStat.isDirectory() && !entry.startsWith('.')) {
+                const subEntries = fs.readdirSync(entryPath).filter(e => e.endsWith(cat.ext || '.md') && !e.startsWith('.')).sort();
+                for (const sub of subEntries) {
+                  try {
+                    const subStat = fs.statSync(path.join(entryPath, sub));
+                    items.push({ name: entry + '/' + sub, path: cat.dir + '/' + entry + '/' + sub, modified: subStat.mtimeMs, size: subStat.size });
+                  } catch {}
+                }
+              }
+            }
+          } else {
+            const entries = fs.readdirSync(dirFull).filter(e => e.endsWith(cat.ext || '.md') && !e.startsWith('.')).sort();
+            for (const e of entries) {
+              try {
+                const stat = fs.statSync(path.join(dirFull, e));
+                items.push({ name: e, path: cat.dir + '/' + e, modified: stat.mtimeMs, size: stat.size });
+              } catch {}
+            }
+          }
+        }
+      } catch {}
+    }
+    // Sort dir-based categories by modification time (newest first)
+    if (cat.dir) items.sort((a, b) => b.modified - a.modified);
+    if (items.length > 0) categories.push({ id: cat.id, label: cat.label, files: items });
+  }
+  return categories;
+}
+
+// Allowlist of readable directories for docs endpoint (security)
+const DOCS_ALLOWED_DIRS = [
+  'claw-projects/', '.openclaw/workspace/', 'ai-Projects/', 'Downloads/CMSGeneXus/'
+];
+
+function isDocPathAllowed(relPath) {
+  if (relPath.includes('..')) return false;
+  return DOCS_ALLOWED_DIRS.some(d => relPath.startsWith(d));
+}
+
 function getTodayTokens() {
   try {
     const files = fs.readdirSync(sessDir).filter(f => f.endsWith('.jsonl'));
@@ -828,6 +1122,63 @@ setInterval(saveHealthSnapshot, 5 * 60 * 1000);
 saveHealthSnapshot(); // Initial snapshot
 
 const server = http.createServer((req, res) => {
+  // Security headers for all responses
+  res.setHeader('X-Content-Type-Options', 'nosniff');
+  res.setHeader('X-Frame-Options', 'DENY');
+  res.setHeader('Referrer-Policy', 'strict-origin-when-cross-origin');
+  res.setHeader('X-XSS-Protection', '1; mode=block');
+
+  // Auth endpoints (always accessible)
+  if (req.url === '/api/auth/login' && req.method === 'POST') {
+    let body = '';
+    req.on('data', c => body += c);
+    req.on('end', () => {
+      try {
+        const { password } = JSON.parse(body);
+        if (password === AUTH_PASSWORD) {
+          const token = generateSessionToken();
+          authSessions.set(token, { created: Date.now() });
+          const isSecure = req.headers['x-forwarded-proto'] === 'https' || (req.headers.host || '').includes('.ts.net');
+          const cookieFlags = `dash_session=${token}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${7 * 86400}${isSecure ? '; Secure' : ''}`;
+          res.writeHead(200, {
+            'Content-Type': 'application/json',
+            'Set-Cookie': cookieFlags
+          });
+          res.end(JSON.stringify({ ok: true }));
+        } else {
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ ok: false }));
+        }
+      } catch { res.writeHead(400); res.end('Bad request'); }
+    });
+    return;
+  }
+  if (req.url === '/api/auth/logout') {
+    const isSecure = req.headers['x-forwarded-proto'] === 'https' || (req.headers.host || '').includes('.ts.net');
+    res.writeHead(200, {
+      'Content-Type': 'application/json',
+      'Set-Cookie': `dash_session=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0${isSecure ? '; Secure' : ''}`
+    });
+    const cookies = parseCookies(req.headers.cookie);
+    if (cookies.dash_session) authSessions.delete(cookies.dash_session);
+    res.end(JSON.stringify({ ok: true }));
+    return;
+  }
+  // Bot API uses its own token auth — skip session check
+  if (req.url === '/api/chat/bot' && req.method === 'POST') {
+    // handled below in chat section
+  } else if (!isAuthenticated(req)) {
+    // API calls get JSON 401; browser gets login page
+    if (req.url.startsWith('/api/')) {
+      res.writeHead(401, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'Unauthorized' }));
+      return;
+    }
+    res.writeHead(200, { 'Content-Type': 'text/html', 'Cache-Control': 'no-store, no-cache, must-revalidate', 'Pragma': 'no-cache' });
+    res.end(loginPage);
+    return;
+  }
+
   if (req.url === '/api/sessions') {
     res.writeHead(200, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
     res.end(JSON.stringify(getSessionsJson()));
@@ -903,6 +1254,86 @@ const server = http.createServer((req, res) => {
     res.end(JSON.stringify(messages));
     return;
   }
+  // Thread messages endpoint — full conversation history for condensador
+  if (req.url.startsWith('/api/thread-messages?')) {
+    const params = new URL(req.url, 'http://localhost').searchParams;
+    const rawId = params.get('session_id') || params.get('id') || '';
+    const sessionId = rawId.replace(/[^a-zA-Z0-9\-_:.]/g, '');
+    const limit = Math.min(parseInt(params.get('limit') || '100', 10), 500);
+    const beforeTs = params.get('before') || null;
+    const messages = [];
+    let hasMore = false;
+    try {
+      const files = fs.readdirSync(sessDir).filter(f => f.endsWith('.jsonl'));
+      let targetFile = files.find(f => f.includes(sessionId));
+      if (!targetFile) {
+        const sFile = path.join(sessDir, 'sessions.json');
+        const data = JSON.parse(fs.readFileSync(sFile, 'utf8'));
+        for (const [k, v] of Object.entries(data)) {
+          if (k === sessionId && v.sessionId) {
+            targetFile = files.find(f => f.includes(v.sessionId));
+            break;
+          }
+        }
+      }
+      if (targetFile) {
+        const lines = fs.readFileSync(path.join(sessDir, targetFile), 'utf8').split('\n').filter(l => l.trim());
+        const allMsgs = [];
+        for (const line of lines) {
+          try {
+            const d = JSON.parse(line);
+            if (d.type !== 'message') continue;
+            const msg = d.message;
+            if (!msg || !msg.role) continue;
+            if (msg.role === 'toolResult') continue;
+            // Extract all text content
+            let text = '';
+            let toolNames = [];
+            if (typeof msg.content === 'string') {
+              text = msg.content;
+            } else if (Array.isArray(msg.content)) {
+              const textParts = msg.content.filter(c => c.type === 'text' && c.text).map(c => c.text);
+              text = textParts.join('\n');
+              toolNames = msg.content.filter(c => c.type === 'tool_use' || c.type === 'toolCall').map(c => c.name || c.toolName || 'tool');
+            }
+            // Skip empty assistant messages (tool-only turns)
+            if (!text && msg.role === 'assistant' && toolNames.length > 0) {
+              text = '[Tools: ' + toolNames.join(', ') + ']';
+            }
+            if (!text) continue;
+            // Strip system prefixes from user messages for cleaner display
+            let cleanText = text;
+            if (msg.role === 'user') {
+              cleanText = text.replace(/^\[(?:Telegram|Mon|Tue|Wed|Thu|Fri|Sat|Sun)[^\]]*\]\s*/s, '');
+              cleanText = cleanText.replace(/^\[message_id:[^\]]*\]\s*/g, '');
+              cleanText = cleanText.replace(/^Conversation info \(untrusted.*?\n```json\n[\s\S]*?```\n*/m, '');
+              cleanText = cleanText.replace(/^System:.*$/m, '').trim();
+            }
+            if (!cleanText) continue;
+            const ts = d.timestamp || '';
+            if (beforeTs && ts >= beforeTs) continue;
+            allMsgs.push({
+              id: d.id || '',
+              role: msg.role,
+              content: cleanText.substring(0, 5000),
+              model: msg.model || null,
+              timestamp: ts,
+              tools: toolNames.length > 0 ? toolNames : undefined,
+            });
+          } catch {}
+        }
+        // Return last N messages (most recent)
+        if (allMsgs.length > limit) {
+          hasMore = true;
+        }
+        const slice = allMsgs.slice(-limit);
+        messages.push(...slice);
+      }
+    } catch {}
+    res.writeHead(200, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*', 'Cache-Control': 'no-store' });
+    res.end(JSON.stringify({ messages, hasMore, oldestTimestamp: messages.length > 0 ? messages[0].timestamp : null }));
+    return;
+  }
   if (req.url === '/api/crons') {
     res.writeHead(200, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
     res.end(JSON.stringify(getCronJobs()));
@@ -954,6 +1385,116 @@ const server = http.createServer((req, res) => {
     }
     return;
   }
+  // ===== OUTPUT PANEL API =====
+  if (req.url === '/api/output') {
+    res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store', 'Access-Control-Allow-Origin': '*' });
+    try {
+      const { DatabaseSync } = require('node:sqlite');
+      const db = new DatabaseSync(antfarmDbPath, { open: true, readOnly: true });
+
+      // 1. Completed runs (last 30)
+      const runs = db.prepare(`
+        SELECT r.id, r.workflow_id, r.task, r.status, r.created_at, r.updated_at
+        FROM runs r WHERE r.status = 'completed'
+        ORDER BY r.updated_at DESC LIMIT 30
+      `).all();
+
+      // 2. Get last step output for each run
+      const runDetails = runs.map(r => {
+        const lastStep = db.prepare(`
+          SELECT step_id, status, output FROM steps
+          WHERE run_id = ? ORDER BY step_index DESC LIMIT 1
+        `).get(r.id);
+        const pidMatch = r.task.match(/P\d+/);
+        return {
+          id: r.id.substring(0, 8),
+          fullId: r.id,
+          workflow: r.workflow_id,
+          project: pidMatch ? pidMatch[0] : null,
+          title: r.task.split('\n')[0].substring(0, 120),
+          created: r.created_at,
+          updated: r.updated_at,
+          lastStep: lastStep ? lastStep.step_id : null,
+          output: lastStep && lastStep.output ? lastStep.output.substring(0, 500) : null
+        };
+      });
+
+      // 3. PRs extracted from step outputs
+      const prSteps = db.prepare(`
+        SELECT s.run_id, s.output, s.updated_at FROM steps s
+        WHERE s.output LIKE '%PR: https://%' OR s.output LIKE '%PR:%https://%'
+        ORDER BY s.updated_at DESC LIMIT 20
+      `).all();
+      const seenUrls = new Set();
+      const prs = prSteps.map(s => {
+        const match = s.output.match(/PR:\s*(https:\/\/[^\s]+)/);
+        if (!match || seenUrls.has(match[1])) return null;
+        seenUrls.add(match[1]);
+        const run = runs.find(r => r.id === s.run_id);
+        const pidMatch = run ? run.task.match(/P\d+/) : null;
+        return { url: match[1], project: pidMatch ? pidMatch[0] : null, date: s.updated_at };
+      }).filter(Boolean);
+
+      db.close();
+
+      // 4. Research files from claw-projects/research/
+      const researchDir = path.join('/home/motobot/claw-projects/research');
+      let research = [];
+      try {
+        research = fs.readdirSync(researchDir)
+          .filter(f => f.endsWith('.md') && !f.startsWith('.'))
+          .map(f => {
+            const stat = fs.statSync(path.join(researchDir, f));
+            return { name: f, modified: stat.mtimeMs, size: stat.size, path: 'claw-projects/research/' + f };
+          })
+          .sort((a, b) => b.modified - a.modified);
+      } catch {}
+
+      // 5. Stats
+      const now = new Date();
+      const weekAgo = new Date(now - 7 * 24 * 60 * 60 * 1000).toISOString();
+      const runsThisWeek = runDetails.filter(r => r.updated >= weekAgo).length;
+      const researchThisWeek = research.filter(r => r.modified > now - 7 * 24 * 60 * 60 * 1000).length;
+
+      res.end(JSON.stringify({
+        runs: runDetails,
+        prs,
+        research,
+        stats: {
+          runsTotal: runDetails.length,
+          runsThisWeek,
+          prsTotal: prs.length,
+          researchTotal: research.length,
+          researchThisWeek
+        }
+      }));
+    } catch (e) {
+      res.end(JSON.stringify({ error: e.message, runs: [], prs: [], research: [], stats: {} }));
+    }
+    return;
+  }
+  // ===== ANTFARM API =====
+  if (req.url === '/api/antfarm') {
+    res.writeHead(200, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
+    try {
+      const { DatabaseSync } = require('node:sqlite');
+      const db = new DatabaseSync(antfarmDbPath, { open: true, readOnly: true });
+      const runs = db.prepare('SELECT id, workflow_id, task, status, context, created_at, updated_at FROM runs ORDER BY created_at DESC LIMIT 20').all();
+      const queue = db.prepare("SELECT id, workflow_id, task, status FROM runs WHERE status IN ('queued','running') ORDER BY created_at DESC").all();
+      const counts = db.prepare('SELECT status, COUNT(*) as cnt FROM runs GROUP BY status').all();
+      // Get steps for recent runs (last 5)
+      const recentRunIds = runs.slice(0, 5).map(r => r.id);
+      const stepsMap = {};
+      for (const rid of recentRunIds) {
+        stepsMap[rid] = db.prepare('SELECT step_id, step_index, status, output, type, created_at, updated_at FROM steps WHERE run_id = ? ORDER BY step_index ASC').all(rid);
+      }
+      db.close();
+      res.end(JSON.stringify({ runs, queue, counts: Object.fromEntries(counts.map(c => [c.status, c.cnt])), steps: stepsMap }));
+    } catch (e) {
+      res.end(JSON.stringify({ error: e.message, runs: [], queue: [], counts: {}, steps: {} }));
+    }
+    return;
+  }
   if (req.url === '/api/response-time') {
     res.writeHead(200, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
     res.end(JSON.stringify({ avgSeconds: getAvgResponseTime() }));
@@ -962,8 +1503,8 @@ const server = http.createServer((req, res) => {
   if (req.url.startsWith('/api/logs?')) {
     try {
       const params = new URL(req.url, 'http://localhost').searchParams;
-      const allowedServices = ['openclaw', 'agent-dashboard', 'tailscaled', 'sshd', 'nginx'];
-      const service = params.get('service') || 'openclaw';
+      const allowedServices = ['openclaw-gateway', 'openclaw-dashboard', 'tailscaled'];
+      const service = params.get('service') || 'openclaw-gateway';
       if (!allowedServices.includes(service)) {
         res.writeHead(400, { 'Content-Type': 'text/plain' });
         res.end('Invalid service name');
@@ -971,7 +1512,7 @@ const server = http.createServer((req, res) => {
       }
       const lines = Math.min(Math.max(parseInt(params.get('lines')) || 100, 1), 1000);
       const { execSync } = require('child_process');
-      const logs = execSync(`journalctl -u ${service} --no-pager -n ${lines} -o short 2>/dev/null || echo "No logs available"`, { encoding: 'utf8', timeout: 10000 });
+      const logs = execSync(`journalctl --user -u ${service} --no-pager -n ${lines} -o short 2>/dev/null || echo "No logs available"`, { encoding: 'utf8', timeout: 10000 });
       res.writeHead(200, { 'Content-Type': 'text/plain', 'Access-Control-Allow-Origin': '*' });
       res.end(logs);
     } catch (e) {
@@ -1163,6 +1704,33 @@ const server = http.createServer((req, res) => {
     res.end(JSON.stringify(healthHistory));
     return;
   }
+  // --- Docs browser endpoints ---
+  if (req.url === '/api/docs') {
+    res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store', 'Access-Control-Allow-Origin': '*' });
+    res.end(JSON.stringify(getDocsIndex()));
+    return;
+  }
+  if (req.url.startsWith('/api/doc?')) {
+    try {
+      const params = new URL(req.url, 'http://localhost').searchParams;
+      const relPath = params.get('path') || '';
+      if (!isDocPathAllowed(relPath)) throw new Error('Path not allowed');
+      const fpath = path.join(DOCS_BASE, relPath);
+      if (fs.existsSync(fpath)) {
+        const content = fs.readFileSync(fpath, 'utf8');
+        res.writeHead(200, { 'Content-Type': 'text/plain', 'Cache-Control': 'no-store', 'Access-Control-Allow-Origin': '*' });
+        res.end(content);
+      } else {
+        res.writeHead(404, { 'Content-Type': 'text/plain' });
+        res.end('File not found');
+      }
+    } catch (e) {
+      res.writeHead(403, { 'Content-Type': 'text/plain' });
+      res.end('Forbidden');
+    }
+    return;
+  }
+
   if (req.url === '/api/memory-files') {
     res.writeHead(200, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
     res.end(JSON.stringify(getMemoryFiles()));
@@ -1238,25 +1806,42 @@ const server = http.createServer((req, res) => {
     res.write('data: {"status":"connected"}\n\n');
     
     try {
-      // Only backfill from recently modified sessions (last 1h)
+      // Backfill from recently modified sessions (last 1h) — both sources
       const cutoff = Date.now() - 3600000;
-      const files = fs.readdirSync(sessDir).filter(f => {
-        if (!f.endsWith('.jsonl')) return false;
-        try { return fs.statSync(path.join(sessDir, f)).mtimeMs > cutoff; } catch { return false; }
-      });
-      const recentEvents = [];
-      files.forEach(file => {
-        const sessionKey = file.replace('.jsonl', '');
-        const content = fs.readFileSync(path.join(sessDir, file), 'utf8');
-        const lines = content.split('\n').filter(l => l.trim());
-        lines.slice(-5).forEach(line => {
-          try {
-            const data = JSON.parse(line);
-            data._sessionKey = sessionKey;
-            const event = formatLiveEvent(data);
-            if (event) recentEvents.push(event);
-          } catch {}
+      const backfillFiles = [];
+      try {
+        fs.readdirSync(sessDir).filter(f => f.endsWith('.jsonl')).forEach(f => {
+          const fp = path.join(sessDir, f);
+          try { if (fs.statSync(fp).mtimeMs > cutoff) backfillFiles.push({ fp, sid: f.replace('.jsonl', '') }); } catch {}
         });
+      } catch {}
+      try {
+        const dirs = fs.readdirSync(claudeCliDir).filter(d => {
+          try { return !d.startsWith('-tmp-antfarm-work') && fs.statSync(path.join(claudeCliDir, d)).isDirectory(); } catch { return false; }
+        });
+        for (const dir of dirs) {
+          try {
+            fs.readdirSync(path.join(claudeCliDir, dir)).filter(f => f.endsWith('.jsonl')).forEach(f => {
+              const fp = path.join(claudeCliDir, dir, f);
+              try { if (fs.statSync(fp).mtimeMs > cutoff) backfillFiles.push({ fp, sid: f.replace('.jsonl', '') }); } catch {}
+            });
+          } catch {}
+        }
+      } catch {}
+      const recentEvents = [];
+      backfillFiles.forEach(({ fp, sid }) => {
+        try {
+          const content = fs.readFileSync(fp, 'utf8');
+          const lines = content.split('\n').filter(l => l.trim());
+          lines.slice(-5).forEach(line => {
+            try {
+              const data = JSON.parse(line);
+              data._sessionKey = sid;
+              const event = formatLiveEvent(data);
+              if (event) recentEvents.push(event);
+            } catch {}
+          });
+        } catch {}
       });
       recentEvents.sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp));
       recentEvents.slice(0, 20).forEach(event => {
@@ -1274,9 +1859,569 @@ const server = http.createServer((req, res) => {
     
     return;
   }
+  // ===== CHAT LOGS (outgoing message history) =====
+  if (req.url === '/api/chat-logs') {
+    res.writeHead(200, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
+    try {
+      const files = fs.existsSync(chatLogsDir)
+        ? fs.readdirSync(chatLogsDir).filter(f => f.endsWith('.log')).sort().reverse()
+        : [];
+      const index = files.map(f => {
+        const stat = fs.statSync(path.join(chatLogsDir, f));
+        // Parse date and channel from filename: YYYY-MM-DD-channel.log
+        const match = f.match(/^(\d{4}-\d{2}-\d{2})-(.+)\.log$/);
+        return {
+          file: f,
+          date: match ? match[1] : f,
+          channel: match ? match[2] : 'unknown',
+          size: stat.size,
+          modified: stat.mtimeMs
+        };
+      });
+      res.end(JSON.stringify(index));
+    } catch (e) {
+      res.end('[]');
+    }
+    return;
+  }
+  if (req.url.startsWith('/api/chat-log?')) {
+    try {
+      const params = new URL(req.url, 'http://localhost').searchParams;
+      const file = params.get('file') || '';
+      // Security: only allow .log files, no path traversal
+      if (!file.match(/^\d{4}-\d{2}-\d{2}-.+\.log$/) || file.includes('..') || file.includes('/')) {
+        res.writeHead(400, { 'Content-Type': 'text/plain' });
+        res.end('Invalid file name');
+        return;
+      }
+      const fpath = path.join(chatLogsDir, file);
+      if (fs.existsSync(fpath)) {
+        const content = fs.readFileSync(fpath, 'utf8');
+        res.writeHead(200, { 'Content-Type': 'text/plain', 'Access-Control-Allow-Origin': '*' });
+        res.end(content);
+      } else {
+        res.writeHead(404, { 'Content-Type': 'text/plain' });
+        res.end('File not found');
+      }
+    } catch (e) {
+      res.writeHead(400, { 'Content-Type': 'text/plain' });
+      res.end('Bad request');
+    }
+    return;
+  }
+  // ===== CHAT SYSTEM =====
+  if (req.url === '/api/chat/messages') {
+    res.writeHead(200, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
+    try {
+      const msgs = fs.existsSync(chatFile) ? JSON.parse(fs.readFileSync(chatFile, 'utf8')) : [];
+      res.end(JSON.stringify(msgs.slice(-100)));
+    } catch { res.end('[]'); }
+    return;
+  }
+  if (req.url === '/api/chat/send' && req.method === 'POST') {
+    let body = '';
+    req.on('data', c => body += c);
+    req.on('end', () => {
+      try {
+        const { text, role } = JSON.parse(body);
+        if (!text || !text.trim()) throw new Error('Empty message');
+        const msg = { id: Date.now().toString(36), role: role || 'user', text: text.trim(), ts: new Date().toISOString() };
+        let msgs = [];
+        try { msgs = JSON.parse(fs.readFileSync(chatFile, 'utf8')); } catch {}
+        msgs.push(msg);
+        if (msgs.length > 500) msgs = msgs.slice(-500);
+        fs.writeFileSync(chatFile, JSON.stringify(msgs, null, 2));
+        broadcastChatEvent(msg);
+        if (msg.role === 'user') {
+          fs.writeFileSync(chatCommandFile, msg.text + '\n');
+        }
+        res.writeHead(200, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
+        res.end(JSON.stringify({ ok: true, msg }));
+      } catch (e) {
+        res.writeHead(400, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
+        res.end(JSON.stringify({ error: e.message }));
+      }
+    });
+    return;
+  }
+  if (req.url === '/api/chat/bot' && req.method === 'POST') {
+    let body = '';
+    req.on('data', c => body += c);
+    req.on('end', () => {
+      try {
+        const { text, token } = JSON.parse(body);
+        if (token !== CHAT_TOKEN) { res.writeHead(401); res.end('Unauthorized'); return; }
+        if (!text || !text.trim()) throw new Error('Empty message');
+        const msg = { id: Date.now().toString(36), role: 'bot', text: text.trim(), ts: new Date().toISOString() };
+        let msgs = [];
+        try { msgs = JSON.parse(fs.readFileSync(chatFile, 'utf8')); } catch {}
+        msgs.push(msg);
+        if (msgs.length > 500) msgs = msgs.slice(-500);
+        fs.writeFileSync(chatFile, JSON.stringify(msgs, null, 2));
+        broadcastChatEvent(msg);
+        res.writeHead(200, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
+        res.end(JSON.stringify({ ok: true }));
+      } catch (e) {
+        res.writeHead(400, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
+        res.end(JSON.stringify({ error: e.message }));
+      }
+    });
+    return;
+  }
+  if (req.url === '/api/chat/live') {
+    res.writeHead(200, {
+      'Content-Type': 'text/event-stream',
+      'Cache-Control': 'no-cache',
+      'Connection': 'keep-alive',
+      'Access-Control-Allow-Origin': '*'
+    });
+    chatClients.push(res);
+    res.write('data: {"status":"connected"}\n\n');
+    req.on('close', () => { chatClients = chatClients.filter(c => c !== res); });
+    return;
+  }
+  if (req.url === '/api/chat/command') {
+    res.writeHead(200, { 'Content-Type': 'text/plain', 'Access-Control-Allow-Origin': '*' });
+    try {
+      if (fs.existsSync(chatCommandFile)) {
+        const cmd = fs.readFileSync(chatCommandFile, 'utf8').trim();
+        fs.unlinkSync(chatCommandFile);
+        res.end(cmd);
+      } else {
+        res.end('');
+      }
+    } catch { res.end(''); }
+    return;
+  }
+  // ===== END CHAT SYSTEM =====
+
+  // ===== CONTROL API =====
+  if (req.url === '/api/control') {
+    res.writeHead(200, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
+    try {
+      // 1. Antfarm runs (recent 30)
+      let antfarmRuns = [], antfarmSteps = {};
+      try {
+        const { DatabaseSync } = require('node:sqlite');
+        const db = new DatabaseSync(antfarmDbPath, { open: true, readOnly: true });
+        antfarmRuns = db.prepare('SELECT id, workflow_id, task, status, context, created_at, updated_at FROM runs ORDER BY updated_at DESC LIMIT 30').all();
+        const activeIds = antfarmRuns.filter(r => ['running', 'queued', 'failed'].includes(r.status)).map(r => r.id);
+        const recentIds = antfarmRuns.slice(0, 10).map(r => r.id);
+        const idsToFetch = [...new Set([...activeIds, ...recentIds])];
+        for (const rid of idsToFetch) {
+          antfarmSteps[rid] = db.prepare('SELECT step_id, step_index, status, output, type, created_at, updated_at FROM steps WHERE run_id = ? ORDER BY step_index ASC').all(rid);
+        }
+        db.close();
+      } catch (e) { /* antfarm unavailable */ }
+
+      // 2. Spec proposals (recent, non-expired)
+      const proposalsPath = path.join(os.homedir(), 'claw-projects', 'spec-proposals.json');
+      let proposals = [];
+      try {
+        if (fs.existsSync(proposalsPath)) {
+          proposals = JSON.parse(fs.readFileSync(proposalsPath, 'utf-8'))
+            .filter(p => p.status !== 'expired')
+            .slice(-50);
+        }
+      } catch {}
+
+      // 3. Insights summary (counts only, not full data)
+      const insightsPath = path.join(os.homedir(), 'claw-projects', 'insights.json');
+      let insightsSummary = { total: 0, thisWeek: 0, highScore: 0 };
+      try {
+        if (fs.existsSync(insightsPath)) {
+          const all = JSON.parse(fs.readFileSync(insightsPath, 'utf-8'));
+          insightsSummary.total = all.length;
+          const weekAgo = new Date(Date.now() - 7 * 86400000).toISOString().slice(0, 10);
+          insightsSummary.thisWeek = all.filter(i => i.date >= weekAgo).length;
+          insightsSummary.highScore = all.filter(i => (i.score || 0) >= 7 && !i.expired).length;
+        }
+      } catch {}
+
+      // 4. Pipeline log (last 20 entries)
+      const pipelinePath = path.join(os.homedir(), 'claw-projects', 'pipeline-log.json');
+      let pipelineLog = [];
+      try {
+        if (fs.existsSync(pipelinePath)) {
+          pipelineLog = JSON.parse(fs.readFileSync(pipelinePath, 'utf-8')).slice(-20);
+        }
+      } catch {}
+
+      // 5. Projects from IMPROVEMENT-PROJECTS.md
+      const projectsFile = path.join(os.homedir(), 'claw-projects', 'IMPROVEMENT-PROJECTS.md');
+      let projects = [];
+      try {
+        if (fs.existsSync(projectsFile)) {
+          const md = fs.readFileSync(projectsFile, 'utf-8');
+          let section = '';
+          let current = null;
+          for (const line of md.split('\n')) {
+            const sectionMatch = line.match(/^# (.+)/);
+            if (sectionMatch && !line.startsWith('# OpenClaw')) {
+              section = sectionMatch[1].trim();
+              continue;
+            }
+            const projMatch = line.match(/^## \[(\w+)\]\s*(.+?)\s*—\s*(.+)/);
+            if (projMatch) {
+              if (current) projects.push(current);
+              current = { tag: projMatch[1], id: projMatch[2].trim(), title: projMatch[3].trim(), section, status: '', priority: '', lines: [] };
+              continue;
+            }
+            if (current) {
+              const priMatch = line.match(/\*?\*?(?:Prioridad|Priority)\*?\*?:\*?\*?\s*(.+)/i);
+              if (priMatch) current.priority = priMatch[1].replace(/\*\*/g, '').trim();
+              const statMatch = line.match(/\*?\*?(?:Estado|Status)\*?\*?:\*?\*?\s*(.+)/i);
+              if (statMatch) current.status = statMatch[1].replace(/\*\*/g, '').trim();
+              if (line.trim()) current.lines.push(line);
+            }
+          }
+          if (current) projects.push(current);
+          // Exclude completed-recientes and backlog sections from default view — keep active/pending
+          projects = projects.filter(p => !p.section.match(/COMPLETADOS|BACKLOG|REFERENCIA|POSTERGADOS/i));
+        }
+      } catch {}
+
+      // 6. Active Claude sessions (conversations)
+      let sessions = [];
+      try {
+        sessions = getSessionsJson()
+          .filter(s => s.kind === 'direct')
+          .sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0))
+          .slice(0, 15);
+      } catch {}
+
+      // 7. Message threads (from message-tailer)
+      let threads = [];
+      try {
+        const { DatabaseSync } = require('node:sqlite');
+        const tdb = new DatabaseSync(antfarmDbPath, { open: true, readOnly: true });
+        threads = tdb.prepare(`
+          SELECT id, session_key, label, status, message_count, last_activity, first_activity, project_ids, channel
+          FROM threads WHERE status != 'archived'
+          ORDER BY last_activity DESC LIMIT 50
+        `).all();
+        tdb.close();
+      } catch {}
+
+      // 8. Spec artifacts (from specs/ directory)
+      let artifacts = [];
+      try {
+        const specsDir = path.join(os.homedir(), '.openclaw', 'workspace', 'specs');
+        if (fs.existsSync(specsDir)) {
+          for (const entry of fs.readdirSync(specsDir, { withFileTypes: true })) {
+            if (entry.isDirectory()) {
+              const specName = entry.name;
+              const specPath = path.join(specsDir, specName);
+              const files = fs.readdirSync(specPath).filter(f => f.endsWith('.md') && !f.startsWith('.'));
+              // Extract project ID from dir name (e.g. "p88-message-queue" → "P88")
+              const pidMatch = specName.match(/^p(\d+)/i);
+              const projectId = pidMatch ? 'P' + pidMatch[1] : null;
+              const phases = [];
+              for (const f of files) {
+                const base = f.replace('.md', '');
+                const stat = fs.statSync(path.join(specPath, f));
+                phases.push({ name: base, file: f, modified: stat.mtime.toISOString(), size: stat.size });
+              }
+              artifacts.push({ spec: specName, projectId, phases, path: specPath });
+            } else if (entry.isFile() && entry.name.endsWith('.md') && entry.name !== '.current-spec') {
+              // Standalone research files
+              const stat = fs.statSync(path.join(specsDir, entry.name));
+              const pidMatch = entry.name.match(/^p(\d+)/i);
+              const projectId = pidMatch ? 'P' + pidMatch[1] : null;
+              artifacts.push({ spec: entry.name.replace('.md', ''), projectId, phases: [{ name: 'research', file: entry.name, modified: stat.mtime.toISOString(), size: stat.size }], path: path.join(specsDir, entry.name) });
+            }
+          }
+          // Enrich artifacts without projectId using Spec: field from IMPROVEMENT-PROJECTS.md
+          if (projects.length > 0) {
+            const specToProject = {};
+            for (const p of projects) {
+              for (const line of (p.lines || [])) {
+                const specMatch = line.match(/\*{0,2}Spec:\*{0,2}\s*`?([^`*(]+?)\/?`?(?:\s|\(|$)/i);
+                if (specMatch && p.id) {
+                  // Extract basename from full path: "~/.openclaw/workspace/specs/p80-foo/" → "p80-foo"
+                  const specPath = specMatch[1].trim().replace(/\/$/, '');
+                  const specName = specPath.split('/').pop();
+                  if (specName) specToProject[specName] = p.id;
+                }
+              }
+            }
+            for (const a of artifacts) {
+              if (!a.projectId && specToProject[a.spec]) {
+                a.projectId = specToProject[a.spec];
+              }
+            }
+          }
+
+          artifacts.sort((a, b) => {
+            const aMax = Math.max(...a.phases.map(p => new Date(p.modified).getTime()));
+            const bMax = Math.max(...b.phases.map(p => new Date(p.modified).getTime()));
+            return bMax - aMax;
+          });
+        }
+      } catch {}
+
+      // 9. Recent chat activity (last N messages from today's telegram log)
+      let recentChat = { lastActivity: null, recentTopics: [], messageCount: 0 };
+      try {
+        const today = new Date().toISOString().slice(0, 10);
+        const telegramLog = path.join(chatLogsDir, today + '-telegram.log');
+        if (fs.existsSync(telegramLog)) {
+          const logContent = fs.readFileSync(telegramLog, 'utf-8');
+          const lines = logContent.split('\n').filter(l => l.startsWith('['));
+          recentChat.messageCount = lines.length;
+          // Get last 30 lines for topic extraction
+          const recent = lines.slice(-30);
+          // Extract timestamps from last entry
+          const lastLine = recent[recent.length - 1] || '';
+          const timeMatch = lastLine.match(/^\[(\d{2}:\d{2}:\d{2})\]/);
+          if (timeMatch) recentChat.lastActivity = today + 'T' + timeMatch[1];
+          // Extract project mentions (P-numbers and keywords)
+          const topicSet = new Set();
+          for (const line of recent) {
+            const pMatches = line.match(/\bP\d{2,3}\b/gi);
+            if (pMatches) pMatches.forEach(p => topicSet.add(p.toUpperCase()));
+            // Detect project name keywords
+            if (/transporte/i.test(line)) topicSet.add('TRANSPORTE');
+            if (/mission.?control|dashboard/i.test(line)) topicSet.add('DASHBOARD');
+            if (/antfarm|feeder|worker/i.test(line)) topicSet.add('ANTFARM');
+          }
+          recentChat.recentTopics = [...topicSet];
+        }
+      } catch {}
+
+      res.end(JSON.stringify({
+        antfarm: { runs: antfarmRuns, steps: antfarmSteps },
+        proposals,
+        insights: insightsSummary,
+        pipeline: pipelineLog,
+        projects,
+        sessions,
+        threads,
+        artifacts,
+        recentChat,
+      }));
+    } catch (e) {
+      res.end(JSON.stringify({ error: e.message, antfarm: { runs: [], steps: {} }, proposals: [], insights: {}, pipeline: [], sessions: [], artifacts: [] }));
+    }
+    return;
+  }
+  // --- /api/artifact — read a spec artifact file content ---
+  if (req.url.startsWith('/api/artifact?')) {
+    res.writeHead(200, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*', 'Cache-Control': 'no-store' });
+    try {
+      const url = new URL(req.url, `http://${req.headers.host}`);
+      const spec = url.searchParams.get('spec') || '';
+      const file = url.searchParams.get('file') || '';
+      // Sanitize: no path traversal
+      if (spec.includes('..') || file.includes('..') || spec.includes('/') || file.includes('/')) {
+        res.end(JSON.stringify({ error: 'Invalid path' }));
+        return;
+      }
+      const specsDir = path.join(os.homedir(), '.openclaw', 'workspace', 'specs');
+      let filePath;
+      // Check if it's a directory spec or standalone file
+      const dirPath = path.join(specsDir, spec);
+      if (fs.existsSync(dirPath) && fs.statSync(dirPath).isDirectory()) {
+        filePath = path.join(dirPath, file);
+      } else {
+        filePath = path.join(specsDir, spec + '.md');
+      }
+      if (!fs.existsSync(filePath)) {
+        res.end(JSON.stringify({ error: 'Not found' }));
+        return;
+      }
+      const content = fs.readFileSync(filePath, 'utf-8');
+      res.end(JSON.stringify({ spec, file, content: content.substring(0, 50000) }));
+    } catch (e) {
+      res.end(JSON.stringify({ error: e.message }));
+    }
+    return;
+  }
+  // --- /api/messages — paginated messages by thread or project ---
+  if (req.url.startsWith('/api/messages')) {
+    res.writeHead(200, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*', 'Cache-Control': 'no-store' });
+    try {
+      const url = new URL(req.url, `http://${req.headers.host}`);
+      const sessionKey = url.searchParams.get('session_key');
+      const projectId = url.searchParams.get('project');
+      const proposalId = url.searchParams.get('proposal');
+      const limit = Math.min(parseInt(url.searchParams.get('limit') || '50'), 200);
+      const before = url.searchParams.get('before'); // ISO timestamp for pagination
+
+      const { DatabaseSync } = require('node:sqlite');
+      const mdb = new DatabaseSync(antfarmDbPath, { open: true, readOnly: true });
+
+      let messages = [];
+      if (sessionKey) {
+        if (before) {
+          messages = mdb.prepare(
+            'SELECT * FROM messages WHERE session_key = ? AND created_at < ? ORDER BY created_at DESC LIMIT ?'
+          ).all(sessionKey, before, limit);
+        } else {
+          messages = mdb.prepare(
+            'SELECT * FROM messages WHERE session_key = ? ORDER BY created_at DESC LIMIT ?'
+          ).all(sessionKey, limit);
+        }
+      } else if (projectId) {
+        // Search messages for a specific project:
+        // - From single-project threads: show ALL messages (the whole thread is about this project)
+        // - From multi-project threads: only show messages with explicit project_id match
+        // - Always include messages with explicit project_id match regardless of thread
+        const pattern = `%${projectId}%`;
+
+        // Separate single-project threads from multi-project threads
+        const allThreads = mdb.prepare(
+          'SELECT session_key, project_ids FROM threads WHERE project_ids LIKE ?'
+        ).all(pattern);
+        const singleProjectKeys = allThreads
+          .filter(t => !t.project_ids || !t.project_ids.includes(','))
+          .map(t => t.session_key);
+        // Multi-project threads: only explicit project_id matches, not all messages
+
+        // Build query: explicit project_id match OR all messages from single-project threads
+        if (singleProjectKeys.length > 0) {
+          const placeholders = singleProjectKeys.map(() => '?').join(',');
+          if (before) {
+            messages = mdb.prepare(
+              'SELECT * FROM messages WHERE (project_id LIKE ? OR session_key IN (' + placeholders + ')) AND created_at < ? ORDER BY created_at DESC LIMIT ?'
+            ).all(pattern, ...singleProjectKeys, before, limit);
+          } else {
+            messages = mdb.prepare(
+              'SELECT * FROM messages WHERE (project_id LIKE ? OR session_key IN (' + placeholders + ')) ORDER BY created_at DESC LIMIT ?'
+            ).all(pattern, ...singleProjectKeys, limit);
+          }
+        } else {
+          // No single-project threads — only explicit project_id matches
+          if (before) {
+            messages = mdb.prepare(
+              'SELECT * FROM messages WHERE project_id LIKE ? AND created_at < ? ORDER BY created_at DESC LIMIT ?'
+            ).all(pattern, before, limit);
+          } else {
+            messages = mdb.prepare(
+              'SELECT * FROM messages WHERE project_id LIKE ? ORDER BY created_at DESC LIMIT ?'
+            ).all(pattern, limit);
+          }
+        }
+      } else if (proposalId) {
+        // Proposals only use chat-messages.json — skip Antfarm DB query
+      } else {
+        // All recent messages
+        if (before) {
+          messages = mdb.prepare(
+            'SELECT * FROM messages WHERE created_at < ? ORDER BY created_at DESC LIMIT ?'
+          ).all(before, limit);
+        } else {
+          messages = mdb.prepare('SELECT * FROM messages ORDER BY created_at DESC LIMIT ?').all(limit);
+        }
+      }
+
+      mdb.close();
+
+      // Also check chat-messages.json for project-tagged messages (from Mission Control chat)
+      if (projectId) {
+        try {
+          const chatMsgs = JSON.parse(fs.readFileSync(chatFile, 'utf8'));
+          const prefix = '[Project: ' + projectId + ']';
+          const projectChatMsgs = chatMsgs
+            .filter(m => m.text && m.text.startsWith(prefix))
+            .map(m => ({
+              id: m.id,
+              session_key: 'dashboard-chat',
+              role: m.role === 'bot' ? 'assistant' : m.role || 'user',
+              direction: m.role === 'user' ? 'inbound' : 'outbound',
+              content: m.text.substring(prefix.length).trim(),
+              created_at: m.ts,
+              project_id: projectId,
+              channel: 'dashboard'
+            }));
+          if (projectChatMsgs.length > 0) {
+            messages = messages.concat(projectChatMsgs);
+            // Sort by timestamp and limit
+            messages.sort((a, b) => (a.created_at || '').localeCompare(b.created_at || ''));
+            if (messages.length > limit) messages = messages.slice(-limit);
+          }
+        } catch {}
+      }
+
+      // Also check chat-messages.json for proposal-tagged messages
+      if (proposalId) {
+        try {
+          const chatMsgs = JSON.parse(fs.readFileSync(chatFile, 'utf8'));
+          const prefix = '[Proposal: ' + proposalId + ']';
+          const proposalChatMsgs = chatMsgs
+            .filter(m => m.text && m.text.startsWith(prefix))
+            .map(m => ({
+              id: m.id,
+              session_key: 'dashboard-chat',
+              role: m.role === 'bot' ? 'assistant' : m.role || 'user',
+              direction: m.role === 'user' ? 'inbound' : 'outbound',
+              content: m.text.substring(prefix.length).trim(),
+              created_at: m.ts,
+              proposal_id: proposalId,
+              channel: 'dashboard'
+            }));
+          if (proposalChatMsgs.length > 0) {
+            messages = messages.concat(proposalChatMsgs);
+            messages.sort((a, b) => (a.created_at || '').localeCompare(b.created_at || ''));
+            if (messages.length > limit) messages = messages.slice(-limit);
+          }
+        } catch {}
+      }
+
+      // Reverse to chronological order (Antfarm messages came DESC, chat messages already sorted)
+      if (!projectId && !proposalId) messages.reverse();
+      res.end(JSON.stringify({ messages, count: messages.length }));
+    } catch (e) {
+      res.end(JSON.stringify({ error: e.message, messages: [], count: 0 }));
+    }
+    return;
+  }
+
+  // --- /api/projects-with-messages — projects that have conversation history ---
+  if (req.url === '/api/projects-with-messages') {
+    res.writeHead(200, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*', 'Cache-Control': 'no-store' });
+    try {
+      const { DatabaseSync } = require('node:sqlite');
+      const pdb = new DatabaseSync(antfarmDbPath, { open: true, readOnly: true });
+      // Get all unique project IDs from messages
+      const rows = pdb.prepare('SELECT DISTINCT project_id FROM messages WHERE project_id IS NOT NULL').all();
+      const projectCounts = {};
+      for (const row of rows) {
+        for (const pid of row.project_id.split(',')) {
+          const p = pid.trim();
+          if (p) projectCounts[p] = (projectCounts[p] || 0) + 1;
+        }
+      }
+      // Get actual message counts per project
+      const projects = [];
+      for (const [pid, threadCount] of Object.entries(projectCounts)) {
+        const msgRow = pdb.prepare(
+          "SELECT COUNT(*) as c FROM messages WHERE project_id LIKE ?"
+        ).get(`%${pid}%`);
+        const lastRow = pdb.prepare(
+          "SELECT MAX(created_at) as last_at FROM messages WHERE project_id LIKE ?"
+        ).get(`%${pid}%`);
+        projects.push({
+          id: pid,
+          messageCount: msgRow.c,
+          threadCount,
+          lastActivity: lastRow.last_at,
+        });
+      }
+      projects.sort((a, b) => (b.lastActivity || '').localeCompare(a.lastActivity || ''));
+      pdb.close();
+      res.end(JSON.stringify({ projects }));
+    } catch (e) {
+      res.end(JSON.stringify({ error: e.message, projects: [] }));
+    }
+    return;
+  }
+
+  // ===== END CONTROL API =====
+
   try {
     const html = fs.readFileSync(htmlPath, 'utf8');
-    res.writeHead(200, { 'Content-Type': 'text/html' });
+    res.writeHead(200, { 'Content-Type': 'text/html', 'Cache-Control': 'no-store, no-cache, must-revalidate', 'Pragma': 'no-cache' });
     res.end(html);
   } catch (e) {
     res.writeHead(500);
