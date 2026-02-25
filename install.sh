@@ -100,16 +100,19 @@ if [[ ! $REPLY =~ ^[Yy]$ ]]; then
 fi
 
 echo ""
-echo "📦 Creating systemd service..."
+echo "📦 Creating systemd user service..."
 
-SERVICE_FILE="/etc/systemd/system/agent-dashboard.service"
+# Use user-level systemd (no sudo required)
+SERVICE_DIR="$HOME/.config/systemd/user"
+mkdir -p "$SERVICE_DIR"
+SERVICE_FILE="$SERVICE_DIR/agent-dashboard.service"
+
 SERVICE_CONTENT="[Unit]
 Description=OpenClaw Agent Dashboard
 After=network.target
 
 [Service]
 Type=simple
-User=$USER
 WorkingDirectory=$(pwd)
 ExecStart=$(which node) $(pwd)/server.js
 Environment=DASHBOARD_PORT=$DASHBOARD_PORT
@@ -120,33 +123,52 @@ Restart=always
 RestartSec=5
 
 [Install]
-WantedBy=multi-user.target"
+WantedBy=default.target"
 
-if [ -w /etc/systemd/system ]; then
-  echo "$SERVICE_CONTENT" > "$SERVICE_FILE"
-else
-  echo "$SERVICE_CONTENT" | sudo tee "$SERVICE_FILE" > /dev/null
-fi
-
+echo "$SERVICE_CONTENT" > "$SERVICE_FILE"
 echo "✅ Service file created at $SERVICE_FILE"
 
-# Reload systemd
-sudo systemctl daemon-reload
-echo "✅ Systemd reloaded"
+# Migrate from system-level service if it exists
+SYSTEM_SERVICE="/etc/systemd/system/agent-dashboard.service"
+if [ -f "$SYSTEM_SERVICE" ]; then
+  echo "⚠️  Found old system-level service at $SYSTEM_SERVICE"
+  echo "   Migrating to user-level service (no sudo needed for management)."
+  if sudo -n systemctl stop agent-dashboard 2>/dev/null; then
+    sudo -n systemctl disable agent-dashboard 2>/dev/null
+    echo "✅ Old system service stopped and disabled"
+  else
+    echo "   Run manually: sudo systemctl stop agent-dashboard && sudo systemctl disable agent-dashboard"
+  fi
+fi
+
+# Enable lingering so user services survive logout
+if ! loginctl show-user "$USER" 2>/dev/null | grep -q "Linger=yes"; then
+  if loginctl enable-linger "$USER" 2>/dev/null; then
+    echo "✅ Lingering enabled (service persists after logout)"
+  elif sudo -n loginctl enable-linger "$USER" 2>/dev/null; then
+    echo "✅ Lingering enabled (service persists after logout)"
+  else
+    echo "⚠️  Could not enable lingering. Run: sudo loginctl enable-linger $USER"
+  fi
+fi
+
+# Reload systemd user daemon
+systemctl --user daemon-reload
+echo "✅ Systemd user daemon reloaded"
 
 # Enable service
-sudo systemctl enable agent-dashboard
+systemctl --user enable agent-dashboard
 echo "✅ Service enabled (auto-start on boot)"
 
 # Start service
-sudo systemctl start agent-dashboard
+systemctl --user start agent-dashboard
 echo "✅ Service started"
 
 # Wait a moment for the service to start
 sleep 2
 
 # Check status
-if sudo systemctl is-active --quiet agent-dashboard; then
+if systemctl --user is-active --quiet agent-dashboard; then
   echo ""
   echo "🎉 Installation successful!"
   echo ""
@@ -158,14 +180,14 @@ if sudo systemctl is-active --quiet agent-dashboard; then
   echo "   To enable MFA: Log in → Security page → Enable MFA"
   echo ""
   echo "Useful commands:"
-  echo "  sudo systemctl status agent-dashboard   # Check status"
-  echo "  sudo systemctl restart agent-dashboard  # Restart"
-  echo "  sudo systemctl stop agent-dashboard     # Stop"
-  echo "  journalctl -u agent-dashboard -f        # View logs"
+  echo "  systemctl --user status agent-dashboard   # Check status"
+  echo "  systemctl --user restart agent-dashboard  # Restart"
+  echo "  systemctl --user stop agent-dashboard     # Stop"
+  echo "  journalctl --user -u agent-dashboard -f   # View logs"
   echo ""
 else
   echo ""
   echo "❌ Service failed to start. Check logs:"
-  echo "  journalctl -u agent-dashboard -n 50"
+  echo "  journalctl --user -u agent-dashboard -n 50"
   exit 1
 fi
