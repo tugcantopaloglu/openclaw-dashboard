@@ -1298,6 +1298,489 @@ body.light-theme ::selection { background: rgba(99,102,241,0.2); }
   transition: all 0.2s;
 }
 #themeToggle:hover { background: var(--bg-tertiary); transform: scale(1.05); }
+
+/* Office Simulation Styles */
+.office-container {
+  display: flex;
+  flex-direction: column;
+  gap: 24px;
+  padding: 16px 0;
+}
+
+.office-zone {
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: 16px;
+  padding: 20px;
+  transition: all 0.3s ease;
+}
+
+.office-zone.night-mode {
+  background: #1a1a2e;
+  border-color: #2d2d4a;
+}
+
+.zone-header {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 20px;
+  padding-bottom: 12px;
+  border-bottom: 2px solid var(--border);
+}
+
+.zone-icon {
+  font-size: 28px;
+}
+
+.zone-title {
+  font-size: 18px;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.zone-count {
+  margin-left: auto;
+  font-size: 13px;
+  color: var(--text-muted);
+  background: var(--bg-secondary);
+  padding: 4px 12px;
+  border-radius: 12px;
+}
+
+/* Work Zone - Desks Layout */
+.work-area {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+  gap: 20px;
+  min-height: 200px;
+}
+
+.office-empty-state {
+  grid-column: 1 / -1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  padding: 60px 20px;
+  color: var(--text-muted);
+  text-align: center;
+}
+
+.office-empty-state p {
+  margin-top: 12px;
+  font-size: 14px;
+}
+
+.agent-desk {
+  position: relative;
+  background: var(--bg-secondary);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 16px;
+  cursor: pointer;
+  transition: all 0.3s ease;
+}
+
+.agent-desk:hover {
+  transform: translateY(-4px);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.15);
+  border-color: var(--accent);
+}
+
+.agent-desk.night-mode {
+  background: #252540;
+  border-color: #3d3d5c;
+}
+
+.agent-desk.night-mode:hover {
+  box-shadow: 0 8px 24px rgba(100, 100, 255, 0.2);
+}
+
+.desk-header {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 12px;
+}
+
+.agent-avatar {
+  font-size: 32px;
+  line-height: 1;
+  flex-shrink: 0;
+}
+
+.agent-info {
+  flex: 1;
+  min-width: 0;
+}
+
+.agent-name {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text-primary);
+  margin-bottom: 2px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.agent-role-badge {
+  display: inline-block;
+  font-size: 11px;
+  padding: 2px 8px;
+  background: var(--accent);
+  color: white;
+  border-radius: 10px;
+  font-weight: 500;
+}
+
+.desk-thought-bubble {
+  position: relative;
+  background: var(--bg-primary);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 12px;
+  margin-bottom: 12px;
+}
+
+.desk-thought-bubble::before {
+  content: '';
+  position: absolute;
+  top: -8px;
+  left: 20px;
+  width: 0;
+  height: 0;
+  border-left: 8px solid transparent;
+  border-right: 8px solid transparent;
+  border-bottom: 8px solid var(--border);
+}
+
+.thought-project {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--accent);
+  margin-bottom: 4px;
+}
+
+.thought-task {
+  font-size: 13px;
+  color: var(--text-secondary);
+  line-height: 1.4;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+.desk-status {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+.typing-indicator {
+  display: inline-flex;
+  gap: 3px;
+  animation: typing 1.5s infinite;
+}
+
+.typing-indicator span {
+  width: 6px;
+  height: 6px;
+  background: var(--accent);
+  border-radius: 50%;
+  animation: typingBounce 1.5s infinite;
+}
+
+.typing-indicator span:nth-child(2) {
+  animation-delay: 0.2s;
+}
+
+.typing-indicator span:nth-child(3) {
+  animation-delay: 0.4s;
+}
+
+@keyframes typing {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.5; }
+}
+
+@keyframes typingBounce {
+  0%, 100% { transform: translateY(0); }
+  50% { transform: translateY(-3px); }
+}
+
+.computer-screen {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  font-size: 16px;
+  opacity: 0;
+  animation: screenGlow 2s infinite;
+}
+
+.agent-desk.working .computer-screen {
+  opacity: 1;
+}
+
+@keyframes screenGlow {
+  0%, 100% { opacity: 0.6; }
+  50% { opacity: 1; }
+}
+
+/* Break Room Layout */
+.break-area {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+  gap: 16px;
+  min-height: 150px;
+}
+
+.agent-break-spot {
+  position: relative;
+  background: var(--bg-secondary);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 12px;
+  cursor: pointer;
+  transition: all 0.3s ease;
+  text-align: center;
+}
+
+.agent-break-spot:hover {
+  transform: scale(1.05);
+  border-color: var(--accent);
+}
+
+.agent-break-spot.night-mode {
+  background: #252540;
+  border-color: #3d3d5c;
+}
+
+.break-avatar {
+  font-size: 36px;
+  margin-bottom: 8px;
+}
+
+.break-name {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-primary);
+  margin-bottom: 4px;
+}
+
+.break-action {
+  font-size: 20px;
+  animation: breakAction 3s infinite;
+}
+
+@keyframes breakAction {
+  0%, 100% { transform: scale(1); }
+  50% { transform: scale(1.1); }
+}
+
+/* Agent Popup */
+.agent-popup {
+  display: none;
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.7);
+  z-index: 600;
+  align-items: center;
+  justify-content: center;
+  animation: fadeIn 0.2s ease;
+}
+
+.agent-popup.active {
+  display: flex;
+}
+
+@keyframes fadeIn {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+.agent-popup-content {
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: 16px;
+  width: 90%;
+  max-width: 450px;
+  max-height: 80vh;
+  overflow-y: auto;
+  animation: slideUp 0.3s ease;
+}
+
+@keyframes slideUp {
+  from {
+    opacity: 0;
+    transform: translateY(20px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.agent-popup-close {
+  position: absolute;
+  top: 16px;
+  right: 16px;
+  background: none;
+  border: none;
+  font-size: 24px;
+  color: var(--text-muted);
+  cursor: pointer;
+  padding: 4px;
+  line-height: 1;
+  transition: color 0.2s;
+}
+
+.agent-popup-close:hover {
+  color: var(--text-primary);
+}
+
+.agent-popup-header {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  padding: 24px 24px 20px;
+  border-bottom: 1px solid var(--border);
+}
+
+.agent-popup-avatar {
+  font-size: 48px;
+  line-height: 1;
+}
+
+.agent-popup-name {
+  font-size: 20px;
+  font-weight: 700;
+  color: var(--text-primary);
+  margin-bottom: 4px;
+}
+
+.agent-popup-role {
+  font-size: 14px;
+  color: var(--text-muted);
+  margin: 0;
+}
+
+.agent-popup-body {
+  padding: 20px 24px;
+}
+
+.agent-popup-field {
+  display: flex;
+  margin-bottom: 16px;
+  align-items: flex-start;
+}
+
+.agent-popup-field:last-child {
+  margin-bottom: 0;
+}
+
+.agent-popup-field label {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  min-width: 120px;
+  flex-shrink: 0;
+}
+
+.agent-popup-field span {
+  font-size: 14px;
+  color: var(--text-primary);
+  flex: 1;
+  word-break: break-word;
+}
+
+.agent-popup-footer {
+  padding: 16px 24px;
+  border-top: 1px solid var(--border);
+  display: flex;
+  justify-content: flex-end;
+}
+
+.agent-popup-btn {
+  padding: 10px 20px;
+  background: linear-gradient(135deg, var(--accent), var(--purple));
+  color: white;
+  border: none;
+  border-radius: 8px;
+  font-weight: 600;
+  font-size: 14px;
+  cursor: pointer;
+  transition: all 0.2s;
+}
+
+.agent-popup-btn:hover {
+  transform: translateY(-2px);
+  box-shadow: 0 4px 12px rgba(139, 92, 246, 0.4);
+}
+
+/* Responsive Design */
+@media (max-width: 1024px) {
+  .work-area {
+    grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
+    gap: 16px;
+  }
+
+  .break-area {
+    grid-template-columns: repeat(auto-fill, minmax(160px, 1fr));
+  }
+}
+
+@media (max-width: 768px) {
+  .office-container {
+    gap: 16px;
+  }
+
+  .zone-header {
+    flex-wrap: wrap;
+    gap: 8px;
+  }
+
+  .zone-count {
+    width: 100%;
+    margin-left: 0;
+    text-align: center;
+  }
+
+  .work-area {
+    grid-template-columns: 1fr;
+  }
+
+  .break-area {
+    grid-template-columns: repeat(2, 1fr);
+  }
+}
+
+@media (max-width: 480px) {
+  .agent-popup-header,
+  .agent-popup-body,
+  .agent-popup-footer {
+    padding-left: 16px;
+    padding-right: 16px;
+  }
+
+  .break-area {
+    grid-template-columns: 1fr;
+  }
+
+  .agent-popup-avatar {
+    font-size: 36px;
+  }
+
+  .agent-popup-name {
+    font-size: 18px;
+  }
+}
 </style>
 </head>
 <body>
@@ -1412,6 +1895,14 @@ body.light-theme ::selection { background: rgba(99,102,241,0.2); }
       <div class="nav-item" data-page="security">
         <span class="icon">🔒</span>
         <span class="nav-text">Security</span>
+      </div>
+      <div class="nav-item" data-page="kanban">
+        <span class="icon">📋</span>
+        <span class="nav-text">Kanban</span>
+      </div>
+      <div class="nav-item" data-page="agent-factory">
+        <span class="icon">🏭</span>
+        <span class="nav-text">Agent Factory</span>
       </div>
       <div class="nav-item" data-page="sys-security">
         <span class="icon">🛡️</span>
@@ -2046,6 +2537,130 @@ body.light-theme ::selection { background: rgba(99,102,241,0.2); }
       <div class="card">
         <div id="logViewer" style="background:var(--bg-primary);border-radius:8px;padding:16px;font-family:'JetBrains Mono',monospace;font-size:12px;line-height:1.6;color:var(--text-primary);max-height:700px;overflow-y:auto;white-space:pre-wrap;word-wrap:break-word;">
           <div style="color:var(--text-muted);">Click Refresh to load logs...</div>
+        </div>
+      </div>
+    </div>
+
+    <div class="page" id="kanban">
+      <div class="page-header">
+        <h1 class="page-title">📋 Kanban Board</h1>
+        <div style="font-size:0.8em;color:var(--text-secondary)" id="kanban-meta"></div>
+      </div>
+      <div id="kanban-board" style="display:flex;gap:12px;overflow-x:auto;padding:8px 0;min-height:calc(100vh - 200px);"></div>
+    </div>
+
+    <div class="page" id="agent-factory">
+      <div class="page-header" style="display:flex;justify-content:space-between;align-items:flex-start;flex-wrap:wrap;gap:12px;">
+        <div>
+          <h1 class="page-title">🏭 Agent Factory</h1>
+          <p class="page-subtitle">IT Office Simulation - Monitor your team at work</p>
+        </div>
+        <div style="display:flex;gap:10px;align-items:center;">
+          <button id="officeThemeToggle" onclick="toggleOfficeTheme()" style="padding:8px 16px;background:var(--bg-tertiary);color:var(--text-primary);border:1px solid var(--border);border-radius:8px;font-weight:500;cursor:pointer;font-size:14px;transition:all 0.2s;">🌙 Night Mode</button>
+          <button id="spawnAgentBtn" onclick="openSpawnModal()" style="padding:10px 20px;background:linear-gradient(135deg,var(--accent),var(--purple));color:#fff;border:none;border-radius:10px;font-weight:600;font-size:14px;cursor:pointer;transition:all 0.2s;">➕ Spawn Agent</button>
+        </div>
+      </div>
+
+      <div class="office-container">
+        <!-- Work Zone -->
+        <div class="office-zone work-zone">
+          <div class="zone-header">
+            <span class="zone-icon">🖥️</span>
+            <span class="zone-title">Work Zone</span>
+            <span class="zone-count" id="workZoneCount">0 agents working</span>
+          </div>
+          <div class="work-area" id="workArea">
+            <div class="office-empty-state">
+              <span style="font-size:40px;opacity:0.5;">💻</span>
+              <p>No agents working currently</p>
+            </div>
+          </div>
+        </div>
+
+        <!-- Break Room -->
+        <div class="office-zone break-room">
+          <div class="zone-header">
+            <span class="zone-icon">☕</span>
+            <span class="zone-title">Break Room</span>
+            <span class="zone-count" id="breakRoomCount">0 agents on break</span>
+          </div>
+          <div class="break-area" id="breakArea">
+            <div class="office-empty-state">
+              <span style="font-size:40px;opacity:0.5;">🛋️</span>
+              <p>Break room is empty</p>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Agent Detail Popup -->
+      <div id="agentDetailPopup" class="agent-popup" onclick="if(event.target===this)closeAgentPopup()">
+        <div class="agent-popup-content" onclick="event.stopPropagation()">
+          <button class="agent-popup-close" onclick="closeAgentPopup()">✕</button>
+          <div class="agent-popup-header">
+            <span class="agent-popup-avatar" id="popupAvatar">👨‍💻</span>
+            <div>
+              <h3 class="agent-popup-name" id="popupName">Agent Name</h3>
+              <p class="agent-popup-role" id="popupRole">Role</p>
+            </div>
+          </div>
+          <div class="agent-popup-body">
+            <div class="agent-popup-field">
+              <label>Status:</label>
+              <span id="popupStatus">Working</span>
+            </div>
+            <div class="agent-popup-field">
+              <label>Project:</label>
+              <span id="popupProject">Project Name</span>
+            </div>
+            <div class="agent-popup-field">
+              <label>Current Task:</label>
+              <span id="popupTask">Task description</span>
+            </div>
+            <div class="agent-popup-field">
+              <label>Time Working:</label>
+              <span id="popupTime">0m</span>
+            </div>
+          </div>
+          <div class="agent-popup-footer">
+            <button class="agent-popup-btn" onclick="viewAgentLogs()">📋 View Logs</button>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Spawn Agent Modal -->
+    <div id="spawnModal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,0.7);z-index:500;align-items:center;justify-content:center;" onclick="if(event.target===this)closeSpawnModal()">
+      <div style="background:var(--bg-secondary);border:1px solid var(--border);border-radius:16px;width:90%;max-width:500px;padding:28px;">
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:20px;">
+          <h2 style="font-size:18px;font-weight:700;">➕ Spawn New Agent</h2>
+          <button onclick="closeSpawnModal()" style="background:none;border:none;color:var(--text-secondary);font-size:20px;cursor:pointer;">✕</button>
+        </div>
+        <div style="margin-bottom:16px;">
+          <label style="font-size:12px;font-weight:600;color:var(--text-secondary);text-transform:uppercase;letter-spacing:0.05em;display:block;margin-bottom:6px;">Task Description</label>
+          <textarea id="spawnTask" rows="4" placeholder="Describe what the agent should do..." style="width:100%;padding:12px;background:var(--bg-primary);border:1px solid var(--border);border-radius:8px;color:var(--text-primary);font-size:13px;font-family:'JetBrains Mono',monospace;resize:vertical;"></textarea>
+        </div>
+        <div style="margin-bottom:20px;">
+          <label style="font-size:12px;font-weight:600;color:var(--text-secondary);text-transform:uppercase;letter-spacing:0.05em;display:block;margin-bottom:6px;">Model Override (optional)</label>
+          <input id="spawnModel" type="text" placeholder="e.g. claude-sonnet-4-5-20250514" style="width:100%;padding:10px 12px;background:var(--bg-primary);border:1px solid var(--border);border-radius:8px;color:var(--text-primary);font-size:13px;font-family:'JetBrains Mono',monospace;">
+        </div>
+        <div id="spawnError" style="display:none;color:var(--red);font-size:12px;margin-bottom:12px;padding:8px;background:rgba(239,68,68,0.1);border-radius:6px;"></div>
+        <div style="display:flex;gap:8px;justify-content:flex-end;">
+          <button onclick="closeSpawnModal()" style="padding:10px 20px;background:var(--bg-tertiary);color:var(--text-secondary);border:1px solid var(--border);border-radius:8px;font-weight:500;cursor:pointer;">Cancel</button>
+          <button id="spawnSubmitBtn" onclick="submitSpawnAgent()" style="padding:10px 24px;background:linear-gradient(135deg,var(--accent),var(--purple));color:#fff;border:none;border-radius:8px;font-weight:600;cursor:pointer;">🚀 Spawn</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Agent Logs Modal -->
+    <div id="agentLogsModal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,0.7);z-index:500;align-items:center;justify-content:center;" onclick="if(event.target===this)closeLogsModal()">
+      <div style="background:var(--bg-secondary);border:1px solid var(--border);border-radius:16px;width:90%;max-width:700px;max-height:80vh;overflow:hidden;display:flex;flex-direction:column;">
+        <div style="padding:16px 20px;border-bottom:1px solid var(--border);display:flex;justify-content:space-between;align-items:center;">
+          <h2 style="font-size:16px;font-weight:700;" id="logsModalTitle">Agent Logs</h2>
+          <button onclick="closeLogsModal()" style="background:none;border:none;color:var(--text-secondary);font-size:20px;cursor:pointer;">✕</button>
+        </div>
+        <div id="logsModalContent" style="flex:1;overflow-y:auto;padding:16px 20px;font-family:'JetBrains Mono',monospace;font-size:12px;line-height:1.6;max-height:60vh;min-height:200px;">
+          <div style="color:var(--text-muted);">Loading...</div>
         </div>
       </div>
     </div>
@@ -5693,6 +6308,292 @@ async function dockerAction(action, id) {
     loadDocker();
   } catch(e) { showToast('Error: ' + e.message, 'warning'); }
 }
+// === KANBAN ===
+let agentFactoryInterval=null;
+
+function openSpawnModal(){document.getElementById('spawnModal').style.display='flex';document.getElementById('spawnTask').value='';document.getElementById('spawnModel').value='';document.getElementById('spawnError').style.display='none';setTimeout(()=>document.getElementById('spawnTask').focus(),100)}
+function closeSpawnModal(){document.getElementById('spawnModal').style.display='none'}
+
+async function submitSpawnAgent(){
+  const task=document.getElementById('spawnTask').value.trim();
+  const model=document.getElementById('spawnModel').value.trim();
+  const errEl=document.getElementById('spawnError');
+  const btn=document.getElementById('spawnSubmitBtn');
+  errEl.style.display='none';
+  if(!task){errEl.textContent='Task description is required';errEl.style.display='block';return}
+  btn.disabled=true;btn.textContent='Spawning...';
+  try{
+    const r=await fetch('/api/agents/spawn',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({task,model:model||null})});
+    const d=await r.json();
+    if(d.error){errEl.textContent=d.error;errEl.style.display='block';return}
+    closeSpawnModal();
+    showToast('Agent spawned successfully','success');
+    renderAgentFactory();
+  }catch(e){errEl.textContent='Failed: '+e.message;errEl.style.display='block'}
+  finally{btn.disabled=false;btn.textContent='🚀 Spawn'}
+}
+
+async function killAgent(id){
+  if(!confirm('Kill agent '+id+'?'))return;
+  try{
+    const r=await fetch('/api/agents/kill',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({id})});
+    const d=await r.json();
+    if(d.success){showToast('Agent killed','success');renderAgentFactory()}
+    else showToast('Failed: '+(d.error||'Unknown'),'warning');
+  }catch(e){showToast('Error: '+e.message,'warning')}
+}
+
+function openLogsModal(id,name){
+  document.getElementById('logsModalTitle').textContent='📋 '+name;
+  document.getElementById('logsModalContent').innerHTML='<div style="color:var(--text-muted);">Loading...</div>';
+  document.getElementById('agentLogsModal').style.display='flex';
+  fetch('/api/agents/'+encodeURIComponent(id)+'/logs').then(r=>r.json()).then(d=>{
+    const el=document.getElementById('logsModalContent');
+    if(!d.messages||!d.messages.length){el.innerHTML='<div style="color:var(--text-muted);">No log messages found.</div>';return}
+    el.innerHTML=d.messages.map(m=>{
+      const rc=m.role==='user'?'var(--blue)':m.role==='assistant'?'var(--green)':'var(--yellow)';
+      const ts=m.timestamp?new Date(m.timestamp).toLocaleTimeString('en',{hour:'2-digit',minute:'2-digit',second:'2-digit'}):'';
+      return '<div style="padding:6px 0;border-bottom:1px solid var(--border);">'
+        +'<span style="font-weight:600;color:'+rc+';text-transform:uppercase;font-size:10px;margin-right:8px;">'+m.role+'</span>'
+        +'<span style="color:var(--text-muted);font-size:10px;">'+ts+'</span>'
+        +'<div style="color:var(--text-primary);line-height:1.4;word-break:break-word;margin-top:2px;white-space:pre-wrap;">'+escHtml(m.content)+'</div>'
+        +'</div>';
+    }).join('');
+    el.scrollTop=el.scrollHeight;
+  }).catch(()=>{document.getElementById('logsModalContent').innerHTML='<div style="color:var(--red);">Failed to load logs</div>'});
+}
+function closeLogsModal(){document.getElementById('agentLogsModal').style.display='none'}
+
+function renderAgentFactory(){
+  Promise.all([
+    fetch('/api/agents').then(r=>r.json()),
+    fetch('/api/kanban').then(r=>r.json()).catch(()=>({columns:[],tasks:[]}))
+  ]).then(([agentData,kanbanData])=>{
+    const agents=(agentData.agents||[]).slice(0,8);
+    const kanbanTasks=kanbanData.tasks||[];
+    const workArea=document.getElementById('workArea');
+    const breakArea=document.getElementById('breakArea');
+    const workCount=document.getElementById('workZoneCount');
+    const breakCount=document.getElementById('breakRoomCount');
+
+    if(!workArea||!breakArea)return;
+
+    // Agent avatars by role
+    const roleAvatars={
+      'Senior Java Developer':'👨‍💻',
+      'Junior Java Developer':'🧑‍💻',
+      'QA Engineer':'🧪',
+      'Senior Security Analyst':'🕵️',
+      'DevOps Engineer':'🔧',
+      'Frontend Developer':'🎨',
+      'Technical Writer':'📝'
+    };
+
+    // Break room activities
+    const breakActivities=['☕','📱','😴','🚬','🎵'];
+
+    // Separate working and idle agents
+    const workingAgents=agents.filter(a=>a.status==='working');
+    const idleAgents=agents.filter(a=>a.status!=='working');
+
+    // Update counts
+    workCount.textContent=workingAgents.length+' agent'+(workingAgents.length!==1?'s':'')+' working';
+    breakCount.textContent=idleAgents.length+' agent'+(idleAgents.length!==1?'s':'')+' on break';
+
+    // Render work zone
+    if(!workingAgents.length){
+      workArea.innerHTML='<div class="office-empty-state"><span style="font-size:40px;opacity:0.5;">💻</span><p>No agents working currently</p></div>';
+    }else{
+      workArea.innerHTML=workingAgents.map(agent=>{
+        const avatar=roleAvatars[agent.name]||'👤';
+        // Find project from kanban tasks
+        const task=kanbanTasks.find(t=>t.assignee===agent.id);
+        const projectName=task?task.title.split(':')[0].trim():(agent.currentTask||'No project').split(' ')[0];
+        const currentTask=task?task.title:(agent.currentTask||'No task assigned');
+        const duration=agent.startedAt?Math.round((Date.now()-agent.startedAt)/60000)+'m':'0m';
+        const isNightMode=document.body.classList.contains('night-mode');
+
+        return `
+          <div class="agent-desk working ${isNightMode?'night-mode':''}" onclick="openAgentPopup('${escAttr(agent.id)}')">
+            <span class="computer-screen">💻</span>
+            <div class="desk-header">
+              <span class="agent-avatar">${avatar}</span>
+              <div class="agent-info">
+                <div class="agent-name">${escHtml(agent.name)}</div>
+                <span class="agent-role-badge">${escHtml(agent.name)}</span>
+              </div>
+            </div>
+            <div class="desk-thought-bubble">
+              <div class="thought-project">📁 ${escHtml(projectName)}</div>
+              <div class="thought-task">${escHtml(currentTask)}</div>
+            </div>
+            <div class="desk-status">
+              <span class="typing-indicator"><span></span><span></span><span></span></span>
+              <span>Working · ${duration}</span>
+            </div>
+          </div>
+        `;
+      }).join('');
+    }
+
+    // Render break room
+    if(!idleAgents.length){
+      breakArea.innerHTML='<div class="office-empty-state"><span style="font-size:40px;opacity:0.5;">🛋️</span><p>Break room is empty</p></div>';
+    }else{
+      breakArea.innerHTML=idleAgents.map(agent=>{
+        const avatar=roleAvatars[agent.name]||'👤';
+        const activity=breakActivities[Math.floor(Math.random()*breakActivities.length)];
+        const isNightMode=document.body.classList.contains('night-mode');
+
+        return `
+          <div class="agent-break-spot ${isNightMode?'night-mode':''}" onclick="openAgentPopup('${escAttr(agent.id)}')">
+            <div class="break-avatar">${avatar}</div>
+            <div class="break-name">${escHtml(agent.name)}</div>
+            <div class="break-action">${activity}</div>
+          </div>
+        `;
+      }).join('');
+    }
+  }).catch(()=>{});
+}
+function escAttr(s){return String(s||'').replace(/'/g,"\\'").replace(/"/g,'&quot;')}
+
+document.querySelectorAll('.nav-item').forEach(item=>{item.addEventListener('click',()=>{const page=item.dataset.page;if(page==='agent-factory'){renderAgentFactory();if(agentFactoryInterval)clearInterval(agentFactoryInterval);agentFactoryInterval=setInterval(renderAgentFactory,10000)}})});
+
+// Office Simulation Helper Functions
+let officeNightMode=false;
+function toggleOfficeTheme(){
+  officeNightMode=!officeNightMode;
+  document.body.classList.toggle('night-mode',officeNightMode);
+  const btn=document.getElementById('officeThemeToggle');
+  if(btn)btn.textContent=officeNightMode?'☀️ Day Mode':'🌙 Night Mode';
+
+  // Update all desks and break spots
+  document.querySelectorAll('.agent-desk, .agent-break-spot, .office-zone').forEach(el=>{
+    el.classList.toggle('night-mode',officeNightMode);
+  });
+}
+
+let currentPopupAgent=null;
+function openAgentPopup(agentId){
+  Promise.all([
+    fetch('/api/agents').then(r=>r.json()),
+    fetch('/api/kanban').then(r=>r.json()).catch(()=>({columns:[],tasks:[]}))
+  ]).then(([agentData,kanbanData])=>{
+    const agent=(agentData.agents||[]).find(a=>a.id===agentId);
+    if(!agent)return;
+
+    currentPopupAgent=agent;
+    const popup=document.getElementById('agentDetailPopup');
+    const roleAvatars={
+      'Senior Java Developer':'👨‍💻',
+      'Junior Java Developer':'🧑‍💻',
+      'QA Engineer':'🧪',
+      'Senior Security Analyst':'🕵️',
+      'DevOps Engineer':'🔧',
+      'Frontend Developer':'🎨',
+      'Technical Writer':'📝'
+    };
+
+    // Find project from kanban
+    const task=kanbanData.tasks.find(t=>t.assignee===agent.id);
+    const projectName=task?task.title.split(':')[0].trim():(agent.currentTask||'No project').split(' ')[0];
+    const currentTask=task?task.title:(agent.currentTask||'No task assigned');
+    const duration=agent.startedAt?Math.round((Date.now()-agent.startedAt)/60000)+'m':'0m';
+
+    document.getElementById('popupAvatar').textContent=roleAvatars[agent.type]||'👤';
+    document.getElementById('popupName').textContent=agent.name;
+    document.getElementById('popupRole').textContent=agent.type;
+    document.getElementById('popupStatus').textContent=agent.status.charAt(0).toUpperCase()+agent.status.slice(1);
+    document.getElementById('popupProject').textContent=projectName;
+    document.getElementById('popupTask').textContent=currentTask;
+    document.getElementById('popupTime').textContent=duration;
+
+    popup.classList.add('active');
+  }).catch(()=>{});
+}
+
+function closeAgentPopup(){
+  document.getElementById('agentDetailPopup').classList.remove('active');
+  currentPopupAgent=null;
+}
+
+function viewAgentLogs(){
+  if(!currentPopupAgent)return;
+  closeAgentPopup();
+  openLogsModal(currentPopupAgent.id,currentPopupAgent.name);
+}
+
+// Detect system color scheme preference on page load
+if(window.matchMedia&&window.matchMedia('(prefers-color-scheme: dark)').matches){
+  officeNightMode=true;
+  document.body.classList.add('night-mode');
+  const btn=document.getElementById('officeThemeToggle');
+  if(btn)btn.textContent='☀️ Day Mode';
+  document.querySelectorAll('.agent-desk, .agent-break-spot, .office-zone').forEach(el=>{
+    el.classList.add('night-mode');
+  });
+}
+
+// Random break room activity updates
+setInterval(()=>{
+  const breakActions=document.querySelectorAll('.break-action');
+  if(breakActions.length===0)return;
+  const activities=['☕','📱','😴','🚬','🎵'];
+  breakActions.forEach(el=>{
+    if(Math.random()<0.3){// 30% chance to change activity
+      const newActivity=activities[Math.floor(Math.random()*activities.length)];
+      el.style.opacity='0';
+      setTimeout(()=>{el.textContent=newActivity;el.style.opacity='1'},150);
+    }
+  });
+},7000);
+
+
+
+let kanbanData={columns:[],tasks:[]},kanbanDragId=null;
+async function loadKanban(){try{const r=await fetch('/api/kanban');kanbanData=await r.json()}catch(e){kanbanData={columns:[],tasks:[]}}const m=document.getElementById('kanban-meta');if(m)m.textContent=kanbanData.tasks.length+' task'+(kanbanData.tasks.length!==1?'s':'');try{const agentRes=await fetch('/api/agents');const agentData=await agentRes.json();window.agentNamesData=(agentData.agents||[]).map(a=>a.name)}catch(e){window.agentNamesData=[]}renderKanban()}
+function renderKanban(){
+  const board=document.getElementById('kanban-board');if(!board)return;
+  // Build agent name list for assignee dropdown
+  const agentNames=new Set();
+  try{if(typeof window.agentNamesData!=='undefined')window.agentNamesData.forEach(n=>agentNames.add(n))}catch{}
+  const board_inner='';board.innerHTML='';
+  kanbanData.columns.forEach(col=>{
+    const tasks=kanbanData.tasks.filter(t=>t.column===col.id);
+    const el=document.createElement('div');el.style.cssText='min-width:280px;max-width:320px;flex:1;background:var(--bg-secondary);border-radius:8px;display:flex;flex-direction:column';
+    el.innerHTML='<div style="padding:10px 14px;font-weight:600;font-size:0.85em;border-bottom:2px solid '+col.color+';color:'+col.color+';display:flex;justify-content:space-between;align-items:center;border-radius:8px 8px 0 0"><span>'+escHtml(col.title)+'</span><span style="background:var(--bg-primary);border-radius:10px;padding:1px 8px;font-size:0.8em">'+tasks.length+'</span></div><div class="kanban-col" data-col="'+col.id+'" style="padding:6px;flex:1;overflow-y:auto;min-height:60px">'+(tasks.length===0?'<div style="color:var(--text-secondary);font-size:0.8em;text-align:center;padding:16px;font-style:italic">No tasks</div>':'')+'</div>';
+    const body=el.querySelector('.kanban-col');
+    tasks.forEach(task=>{
+      const t=document.createElement('div');t.draggable=true;t.dataset.id=task.id;
+      t.style.cssText='background:var(--bg-primary);border-radius:6px;padding:8px 10px;margin-bottom:5px;cursor:grab;border-left:3px solid '+col.color+';font-size:0.82em';
+      const assigneeHtml=task.assignee?'<div style="margin-top:4px;font-size:0.7em;color:var(--cyan);">👤 '+escHtml(task.assignee)+'</div>':'';
+      const agentOpts=['<option value="">— assign —</option>'];
+      agentNames.forEach(n=>{agentOpts.push('<option value="'+escAttr(n)+'"'+(task.assignee===n?' selected':'')+'>'+escHtml(n)+'</option>')});
+      t.innerHTML='<div style="font-size:0.72em;color:var(--text-secondary)">'+escHtml(task.id)+'</div><div>'+escHtml(task.title)+'</div>'
+        +(task.priority?'<span style="display:inline-block;font-size:0.68em;padding:1px 6px;border-radius:4px;margin-top:3px;background:'+(task.priority==='high'?'#991b1b':task.priority==='medium'?'#92400e':'#1e3a5f')+';color:'+(task.priority==='high'?'#fca5a5':task.priority==='medium'?'#fcd34d':'#93c5fd')+'">'+escHtml(task.priority)+'</span>':'')
+        +assigneeHtml
+        +'<div style="margin-top:6px;"><select data-task-id="'+escAttr(task.id)+'" onchange="updateTaskAssignee(\''+escAttr(task.id)+'\',this.value)" onclick="event.stopPropagation()" style="width:100%;padding:3px 6px;background:var(--bg-secondary);color:var(--text-primary);border:1px solid var(--border);border-radius:4px;font-size:0.75em;cursor:pointer;outline:none;">'+agentOpts.join('')+'</select></div>';
+      t.addEventListener('dragstart',e=>{kanbanDragId=task.id;e.dataTransfer.effectAllowed='move';t.style.opacity='0.6'});
+      t.addEventListener('dragend',()=>{kanbanDragId=null;t.style.opacity='1'});
+      body.appendChild(t);
+    });
+    body.addEventListener('dragover',e=>{e.preventDefault();body.style.background='var(--bg-hover,#253349)'});
+    body.addEventListener('dragleave',()=>{body.style.background=''});
+    body.addEventListener('drop',e=>{e.preventDefault();body.style.background='';if(!kanbanDragId)return;const task=kanbanData.tasks.find(t=>t.id===kanbanDragId);if(task){task.column=col.id;fetch('/api/kanban',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(kanbanData)}).then(()=>loadKanban())}});
+    board.appendChild(el);
+  });
+}
+
+function updateTaskAssignee(taskId,assignee){
+  const task=kanbanData.tasks.find(t=>t.id===taskId);
+  if(!task)return;
+  task.assignee=assignee||null;
+  fetch('/api/kanban',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(kanbanData)}).then(()=>loadKanban()).catch(()=>{});
+}
+
+function escHtml(s){if(!s)return '';const d=document.createElement('div');d.textContent=s;return d.innerHTML}
+document.addEventListener('DOMContentLoaded',loadKanban);
 </script>
 </body>
 </html>

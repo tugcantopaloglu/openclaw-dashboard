@@ -1,0 +1,19 @@
+services:
+  openclaw-dashboard:
+    image: openclaw-dashboard:latest
+    network_mode: host
+    restart: unless-stopped
+    environment:
+      - DASHBOARD_PORT=7000
+      - DASHBOARD_ALLOW_HTTP=true
+      - OPENCLAW_DIR=/data/.openclaw
+      - WORKSPACE_DIR=/data/.openclaw/workspace
+      - OPENCLAW_AGENT=main
+      - DASHBOARD_AUTH_DIR=/data/dashboard-data
+    volumes:
+      - /data/.openclaw:/data/.openclaw:ro
+      - dashboard-data:/data/dashboard-data
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+
+volumes:
+  dashboard-data:
