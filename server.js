@@ -104,13 +104,35 @@ function loadModelPricing() {
 
 const MODEL_PRICING = loadModelPricing();
 
+function inferProviderFromModel(model) {
+  const m = String(model || '').toLowerCase();
+  if (m.startsWith('claude-')) return 'anthropic';
+  if (m.startsWith('gpt-') || m.startsWith('o1') || m.startsWith('o3')) return 'openai';
+  if (m.startsWith('gemini-')) return 'google';
+  if (m.startsWith('grok-')) return 'xai';
+  return null;
+}
+
+function lookupRates(provider, modelNorm) {
+  // Exact match first
+  const rates = MODEL_PRICING[`${provider}/${modelNorm}`];
+  if (rates) return rates;
+  // For custom/unknown providers, try to infer from model name
+  const inferredProvider = inferProviderFromModel(modelNorm);
+  if (inferredProvider && inferredProvider !== provider) {
+    const inferredModelNorm = normalizeModel(inferredProvider, modelNorm);
+    return MODEL_PRICING[`${inferredProvider}/${inferredModelNorm}`] || null;
+  }
+  return null;
+}
+
 function estimateMsgCost(msg) {
   const usage = msg && msg.usage ? msg.usage : {};
   const explicit = toNum(usage.cost && usage.cost.total);
   if (explicit > 0) return explicit;
   const provider = normalizeProvider(msg && msg.provider);
   const modelNorm = normalizeModel(provider, msg && msg.model);
-  const rates = MODEL_PRICING[`${provider}/${modelNorm}`];
+  const rates = lookupRates(provider, modelNorm);
   if (!rates) return 0;
   const input = Math.max(0, toNum(usage.input)) / 1_000_000;
   const output = Math.max(0, toNum(usage.output)) / 1_000_000;
@@ -750,7 +772,7 @@ function getUsageWindows() {
       const slash = model.indexOf('/');
       const provider = slash >= 0 ? model.slice(0, slash) : 'unknown';
       const modelName = slash >= 0 ? model.slice(slash + 1) : model;
-      const rates = MODEL_PRICING[`${provider}/${modelName}`] || {};
+      const rates = lookupRates(provider, modelName) || {};
       const inputCost = (data.input || 0) / 1000000 * toNum(rates.input);
       const outputCost = (data.output || 0) / 1000000 * toNum(rates.output);
       const cacheReadCost = (data.cacheRead || 0) / 1000000 * toNum(rates.cacheRead);
