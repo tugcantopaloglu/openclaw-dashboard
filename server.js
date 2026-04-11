@@ -26,7 +26,7 @@ const configFiles = [
   { name: 'openclaw-gateway.service', path: path.join(os.homedir(), '.config/systemd/user/openclaw-gateway.service') },
   { name: 'openclaw-config.json',     path: path.join(os.homedir(), '.openclaw/config.json') },
 ];
-const workspaceFilenames = ['AGENTS.md','HEARTBEAT.md','IDENTITY.md','MEMORY.md','SOUL.md','TOOLS.md','USER.md'];
+const workspaceFilenames = ['AGENTS.md','HEARTBEAT.md','IDENTITY.md','MEMORY.md','SOUL.md','TOOLS.md','USERS.md'];
 const claudeUsageFile = path.join(dataDir, 'claude-usage.json');
 const geminiUsageFile = path.join(dataDir, 'gemini-usage.json');
 const scrapeScript = path.join(WORKSPACE_DIR, 'scripts', 'scrape-claude-usage.sh');
