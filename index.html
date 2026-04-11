@@ -1,6 +1,9 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
+<meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
+<meta http-equiv="Pragma" content="no-cache">
+<meta http-equiv="Expires" content="0">
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Agent Dashboard</title>
@@ -1381,6 +1384,14 @@ body.light-theme ::selection { background: rgba(99,102,241,0.2); }
         <span class="icon">📊</span>
         <span class="nav-text">Overview</span>
       </div>
+      <div class="nav-item" data-page="sessions">
+        <span class="icon">🤖</span>
+        <span class="nav-text">Sessions</span>
+      </div>
+      <div class="nav-item" data-page="home">
+        <span class="icon">🏠</span>
+        <span class="nav-text">Home</span>
+      </div>
       <div class="nav-item" data-page="limits">
         <span class="icon">📈</span>
         <span class="nav-text">Limits</span>
@@ -1388,10 +1399,6 @@ body.light-theme ::selection { background: rgba(99,102,241,0.2); }
       <div class="nav-item" data-page="memory">
         <span class="icon">🧠</span>
         <span class="nav-text">Memory</span>
-      </div>
-      <div class="nav-item" data-page="sessions">
-        <span class="icon">🤖</span>
-        <span class="nav-text">Sessions</span>
       </div>
       <div class="nav-item" data-page="kanban">
         <span class="icon">📋</span>
@@ -1650,6 +1657,95 @@ body.light-theme ::selection { background: rgba(99,102,241,0.2); }
           <h3 class="card-title">Session Models</h3>
           <div id="sessionModels"></div>
         </div>
+      </div>
+    </div>
+
+    <div class="page active" id="overview">
+      <div class="page-header">
+        <h1 class="page-title">Overview</h1>
+        <p class="page-subtitle">System overview and quick stats</p>
+      </div>
+
+      <div class="grid grid-4 mb-24">
+        <div class="card">
+          <div class="metric accent">
+            <div class="metric-value" id="statSessions">0</div>
+            <div class="metric-label">Sessions</div>
+          </div>
+        </div>
+        <div class="card">
+          <div class="metric accent">
+            <div class="metric-value" id="statTokens">0</div>
+            <div class="metric-label">Total Tokens</div>
+          </div>
+        </div>
+        <div class="card">
+          <div class="metric accent">
+            <div class="metric-value" id="statCost">$0.00</div>
+            <div class="metric-label">Total Cost</div>
+          </div>
+        </div>
+        <div class="card">
+          <div class="metric">
+            <div class="metric-value" id="statUptime">-</div>
+            <div class="metric-label">Uptime</div>
+          </div>
+        </div>
+      </div>
+
+      <div class="grid grid-2 mb-24">
+        <div class="card">
+          <h3 class="card-title">Session Distribution</h3>
+          <div id="overviewSessionChart" style="min-height:250px;"></div>
+        </div>
+        <div class="card">
+          <h3 class="card-title">Model Usage</h3>
+          <div id="overviewModelChart" style="min-height:250px;"></div>
+        </div>
+      </div>
+
+      <div class="card mb-24">
+        <h3 class="card-title">Recent Activity</h3>
+        <div id="overviewRecentActivity" style="max-height:300px;overflow-y:auto;"></div>
+      </div>
+    </div>
+
+    <div class="page" id="home">
+      <div class="page-header">
+        <h1 class="page-title">🏠 Home</h1>
+        <p class="page-subtitle">Personal dashboard — moving boxes, household</p>
+      </div>
+
+      <div class="grid grid-4 mb-24">
+        <div class="card">
+          <div class="metric accent">
+            <div class="metric-value" id="totalBoxes">-</div>
+            <div class="metric-label">📦 Boxes Packed</div>
+          </div>
+        </div>
+        <div class="card">
+          <div class="metric">
+            <div class="metric-value" id="totalItems">-</div>
+            <div class="metric-label">🏷️ Items Logged</div>
+          </div>
+        </div>
+        <div class="card">
+          <div class="metric">
+            <div class="metric-value" id="lastUpdated">-</div>
+            <div class="metric-label">🕐 Last Updated</div>
+          </div>
+        </div>
+        <div class="card">
+          <div class="metric">
+            <div class="metric-value" id="photosCount">-</div>
+            <div class="metric-label">📸 Photos</div>
+          </div>
+        </div>
+      </div>
+
+      <div class="card mb-24">
+        <h3 class="card-title">📦 Moving Boxes Inventory</h3>
+        <div id="boxesList" style="margin-top:12px;"></div>
       </div>
     </div>
 
@@ -5385,6 +5481,91 @@ setInterval(fetchTailscaleStatus, 30000);
 setInterval(fetchLifetimeStats, 60000);
 setInterval(updatePageTitle, 5000);
 setInterval(() => { if (costs.perDay) calculateStreak(); }, 10000);
+
+
+// ===== Moving Boxes (Home Page) =====
+async function fetchMovingBoxes() {
+  try {
+    const res = await authFetch(API_BASE + '/api/moving-inventory');
+    if (!res.ok) {
+      document.getElementById('boxesList').innerHTML = '<div style="color:var(--red);padding:20px;text-align:center;">HTTP ' + res.status + ': ' + await res.text() + '</div>';
+      return;
+    }
+    const text = await res.text();
+const boxes = parseInventory(text);
+renderBoxes(boxes);
+  } catch(e) {
+document.getElementById('boxesList').innerHTML = '<div style="color:var(--red);padding:20px;text-align:center;">Error: ' + e.message + '</div>';
+  }
+}
+
+function parseInventory(text) {
+  const boxes = [];
+  const lines = text.split('\n');
+  let currentBox = null;
+  for (const line of lines) {
+    const boxMatch = line.match(/^##\s+Коробка №(\d+)/);
+    if (boxMatch) {
+      currentBox = { num: boxMatch[1], content: '—', photo: null };
+      boxes.push(currentBox);
+      continue;
+    }
+    if (!currentBox) continue;
+    const contentMatch = line.match(/\*\*Вміст:\*\*\s*(.+)/);
+    if (contentMatch) currentBox.content = contentMatch[1].trim();
+    const photoMatch = line.match(/\*\*Фото:\*\*\s*(.+)/);
+    if (photoMatch) currentBox.photo = photoMatch[1].trim();
+  }
+  return boxes;
+}
+
+function renderBoxes(boxes) {
+  const list = document.getElementById('boxesList');
+  const totalBoxes = boxes.length;
+  const withPhotos = boxes.filter(b => b.photo).length;
+  
+  document.getElementById('totalBoxes').textContent = totalBoxes;
+  document.getElementById('photosCount').textContent = withPhotos;
+  
+  const allItems = boxes.reduce((acc, b) => {
+    const items = b.content.split(',').map(s => s.trim()).filter(Boolean);
+    return acc + items.length;
+  }, 0);
+  document.getElementById('totalItems').textContent = allItems;
+  
+  const now = new Date();
+  document.getElementById('lastUpdated').textContent = now.toLocaleTimeString('uk-UA', {hour:'2-digit',minute:'2-digit'});
+
+  let html = '<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(300px,1fr));gap:16px;">';
+  for (const box of boxes) {
+    html += `
+      <div style="background:var(--bg-secondary);border:1px solid var(--border);border-radius:12px;padding:16px;display:flex;gap:16px;align-items:flex-start;">
+        ${box.photo ? `
+          <a href="${box.photo}" target="_blank" style="flex-shrink:0;">
+            <img src="${box.photo}" style="width:80px;height:80px;object-fit:cover;border-radius:8px;border:1px solid var(--border);" onerror="this.style.display='none'">
+          </a>
+        ` : `
+          <div style="width:80px;height:80px;border-radius:8px;background:var(--bg-primary);border:1px solid var(--border);display:flex;align-items:center;justify-content:center;flex-shrink:0;font-size:28px;">📦</div>
+        `}
+        <div style="flex:1;min-width:0;">
+          <div style="font-weight:700;font-size:15px;margin-bottom:6px;color:var(--accent);">Коробка №${box.num}</div>
+          <div style="font-size:13px;color:var(--text-secondary);line-height:1.5;">${box.content}</div>
+          ${box.photo ? `<a href="${box.photo}" target="_blank" style="font-size:11px;color:var(--text-muted);margin-top:6px;display:inline-block;">📷 Photo →</a>` : ''}
+        </div>
+      </div>
+    `;
+  }
+  html += '</div>';
+  list.innerHTML = html;
+}
+
+// Load home data when page is shown
+const origNavHandler = document.querySelector('[data-page="home"]');
+if (origNavHandler) {
+  origNavHandler.addEventListener('click', () => { setTimeout(fetchMovingBoxes, 100); });
+}
+fetchMovingBoxes();
+setInterval(fetchMovingBoxes, 60000);
 
 // Initial calls
 setTimeout(() => {

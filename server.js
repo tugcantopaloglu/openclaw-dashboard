@@ -11,7 +11,7 @@ const WORKSPACE_DIR = process.env.WORKSPACE_DIR || process.env.OPENCLAW_WORKSPAC
 const AGENT_ID = process.env.OPENCLAW_AGENT || 'main';
 const sessDir = path.join(OPENCLAW_DIR, 'agents', AGENT_ID, 'sessions');
 const cronFile = path.join(OPENCLAW_DIR, 'cron', 'jobs.json');
-const dataDir = path.join(WORKSPACE_DIR, 'data');
+const dataDir = process.env.DASHBOARD_AUTH_DIR || '/data/dashboard-data';
 const memoryDir = path.join(WORKSPACE_DIR, 'memory');
 const memoryMdPath = path.join(WORKSPACE_DIR, 'MEMORY.md');
 const heartbeatPath = path.join(WORKSPACE_DIR, 'HEARTBEAT.md');
@@ -26,7 +26,7 @@ const configFiles = [
   { name: 'openclaw-gateway.service', path: path.join(os.homedir(), '.config/systemd/user/openclaw-gateway.service') },
   { name: 'openclaw-config.json',     path: path.join(os.homedir(), '.openclaw/config.json') },
 ];
-const workspaceFilenames = ['AGENTS.md','HEARTBEAT.md','IDENTITY.md','MEMORY.md','SOUL.md','TOOLS.md','USERS.md'];
+const workspaceFilenames = ['AGENTS.md','HEARTBEAT.md','IDENTITY.md','MEMORY.md','SOUL.md','TOOLS.md','USERS.md','moving/inventory.md'];
 const claudeUsageFile = path.join(dataDir, 'claude-usage.json');
 const geminiUsageFile = path.join(dataDir, 'gemini-usage.json');
 const scrapeScript = path.join(WORKSPACE_DIR, 'scripts', 'scrape-claude-usage.sh');
@@ -295,7 +295,7 @@ function setSecurityHeaders(res) {
   res.setHeader('X-Content-Type-Options', 'nosniff');
   res.setHeader('X-Frame-Options', 'DENY');
   res.setHeader('X-XSS-Protection', '1; mode=block');
-  res.setHeader('Content-Security-Policy', "default-src 'self'; script-src 'self' 'unsafe-inline'; font-src 'self' https://fonts.gstatic.com; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; img-src 'self' data:");
+  res.setHeader('Content-Security-Policy', "default-src 'self'; script-src 'self' 'unsafe-inline'; font-src 'self' https://fonts.gstatic.com; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; img-src 'self' data: https://files.dovg.cloud");
   res.setHeader('Referrer-Policy', 'strict-origin-when-cross-origin');
   res.setHeader('Strict-Transport-Security', 'max-age=31536000; includeSubDomains');
 }
@@ -924,11 +924,11 @@ function getSystemStats() {
           diskTotal = totalGB + 'G';
         }
       } else {
-        const df = execSync("df / --output=pcent,used,size -B1G | tail -1", { encoding: 'utf8' }).trim();
+        const df = execSync("df -h / | tail -1", { encoding: 'utf8' }).trim();
         const parts = df.split(/\s+/);
-        diskPercent = parseInt(parts[0], 10) || 0;
-        diskUsed = (parts[1] || '') + 'G';
-        diskTotal = (parts[2] || '') + 'G';
+        diskPercent = parseInt(parts[4], 10) || 0;
+        diskUsed = parts[2] || '';
+        diskTotal = parts[1] || '';
       }
     } catch {}
 
@@ -1316,6 +1316,14 @@ function getKeyFiles() {
       }
     }
   } catch {}
+  const movingDir = path.join(WORKSPACE_DIR, 'moving');
+  try {
+    if (fs.existsSync(movingDir)) {
+      for (const e of fs.readdirSync(movingDir)) {
+        if (e.endsWith('.md')) map['moving/' + e] = path.join(movingDir, e);
+      }
+    }
+  } catch {}
   for (const cf of configFiles) {
     try {
       if (fs.existsSync(cf.path)) {
@@ -1344,6 +1352,14 @@ function buildKeyFilesAllowed() {
         } else if (e.endsWith('.md')) {
           map['skills/' + e] = ep;
         }
+      }
+    }
+  } catch {}
+  const movingDir = path.join(WORKSPACE_DIR, 'moving');
+  try {
+    if (fs.existsSync(movingDir)) {
+      for (const e of fs.readdirSync(movingDir)) {
+        if (e.endsWith('.md')) map['moving/' + e] = path.join(movingDir, e);
       }
     }
   } catch {}
@@ -1463,8 +1479,8 @@ function saveHealthSnapshot() {
   }
 }
 
-setInterval(saveHealthSnapshot, 5 * 60 * 1000);
-saveHealthSnapshot();
+setInterval(() => { try { saveHealthSnapshot(); } catch(e) { console.error('Health snapshot error:', e.message); } }, 5 * 60 * 1000);
+try { saveHealthSnapshot(); } catch(e) { console.error('Health snapshot init error:', e.message); }
 
 setInterval(() => {
   const now = Date.now();
@@ -1496,7 +1512,15 @@ const server = http.createServer((req, res) => {
     return;
   }
 
-  if (req.url === '/api/auth/status') {
+  
+  
+if (req.url === '/api/debug-allowed' && req.method === 'GET') {
+      const allowed = buildKeyFilesAllowed();
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify(Object.keys(allowed)));
+      return;
+    }
+if (req.url === '/api/auth/status') {
     const creds = getCredentials();
     const registered = !!creds;
     const loggedIn = isAuthenticated(req);
@@ -1680,6 +1704,25 @@ const server = http.createServer((req, res) => {
         res.end(JSON.stringify({ error: 'Bad request' }));
       }
     });
+    return;
+  }
+
+  if (req.url === '/api/moving-inventory' && req.method === 'GET') {
+    if (!requireAuth(req, res)) return;
+    try {
+      const invPath = path.join(WORKSPACE_DIR, 'moving', 'inventory.md');
+      if (!fs.existsSync(invPath)) {
+        res.writeHead(404, { 'Content-Type': 'text/plain' });
+        res.end('Not found');
+        return;
+      }
+      const content = fs.readFileSync(invPath, 'utf8');
+      res.writeHead(200, { 'Content-Type': 'text/plain' });
+      res.end(content);
+    } catch(e) {
+      res.writeHead(500, { 'Content-Type': 'text/plain' });
+      res.end('Error: ' + e.message);
+    }
     return;
   }
 
