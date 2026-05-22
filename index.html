@@ -541,6 +541,49 @@ body {
   opacity: 1;
 }
 
+.cpu-profiler-chart {
+  width: 100%;
+  height: 240px;
+  background: var(--bg-primary);
+  border-radius: 8px;
+  position: relative;
+  overflow: hidden;
+}
+
+.cpu-profiler-tooltip {
+  position: absolute;
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  padding: 12px;
+  border-radius: 8px;
+  font-size: 12px;
+  pointer-events: none;
+  opacity: 0;
+  transition: opacity 0.2s;
+  z-index: 100;
+  box-shadow: 0 8px 24px rgba(0,0,0,0.5);
+}
+
+.cpu-profiler-legend {
+  display: flex;
+  gap: 16px;
+  margin-top: 12px;
+}
+
+.legend-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+
+.legend-color {
+  width: 12px;
+  height: 12px;
+  border-radius: 2px;
+}
+
 .view-all-link {
   display: block;
   text-align: center;
@@ -1565,6 +1608,24 @@ body.light-theme ::selection { background: rgba(99,102,241,0.2); }
                 <div style="font-size: 10px; color: var(--text-muted); text-transform: uppercase;">7-day</div>
               </div>
             </div>
+          </div>
+        </div>
+      </div>
+
+      <div class="card mb-24">
+        <h3 class="card-title">Process-Isolated CPU Profiler</h3>
+        <div class="cpu-profiler-chart" id="cpuProfilerChartContainer">
+          <svg id="cpuProfilerSvg" width="100%" height="100%" preserveAspectRatio="none" style="display: block;"></svg>
+          <div id="cpuProfilerTooltip" class="cpu-profiler-tooltip"></div>
+        </div>
+        <div class="cpu-profiler-legend">
+          <div class="legend-item">
+            <div class="legend-color" style="background: var(--accent);"></div>
+            <span>User Space</span>
+          </div>
+          <div class="legend-item">
+            <div class="legend-color" style="background: var(--cyan);"></div>
+            <span>Kernel Space</span>
           </div>
         </div>
       </div>
@@ -5693,6 +5754,125 @@ async function dockerAction(action, id) {
     loadDocker();
   } catch(e) { showToast('Error: ' + e.message, 'warning'); }
 }
+
+// --- Process-Isolated CPU Profiler Logic ---
+let cpuProfilerData = [];
+const CPU_PROFILER_MAX_POINTS = 50;
+
+function renderCpuProfiler(data) {
+  const svg = document.getElementById('cpuProfilerSvg');
+  const tooltip = document.getElementById('cpuProfilerTooltip');
+  if (!svg || !data || data.length < 2) return;
+
+  const width = svg.clientWidth || svg.parentNode.clientWidth;
+  const height = svg.clientHeight || svg.parentNode.clientHeight;
+  const padding = { top: 20, right: 10, bottom: 20, left: 40 };
+  const graphWidth = width - padding.left - padding.right;
+  const graphHeight = height - padding.top - padding.bottom;
+
+  const maxVal = Math.max(100, ...data.map(d => (d.openclaw_cpu_user || 0) + (d.openclaw_cpu_system || 0))) * 1.1;
+
+  const getX = (index) => padding.left + (index / (CPU_PROFILER_MAX_POINTS - 1)) * graphWidth;
+  const getY = (val) => padding.top + graphHeight - (val / maxVal) * graphHeight;
+
+  let systemPoints = [];
+  let combinedPoints = [];
+
+  data.forEach((d, i) => {
+    const x = getX(i);
+    const systemY = getY(d.openclaw_cpu_system || 0);
+    const combinedY = getY((d.openclaw_cpu_system || 0) + (d.openclaw_cpu_user || 0));
+    
+    systemPoints.push(`${x},${systemY}`);
+    combinedPoints.push(`${x},${combinedY}`);
+  });
+
+  const systemPathData = `M ${padding.left},${padding.top + graphHeight} ` + 
+    systemPoints.join(' L ') + 
+    ` L ${getX(data.length - 1)},${padding.top + graphHeight} Z`;
+
+  const userPathData = `M ${padding.left},${padding.top + graphHeight} ` + 
+    combinedPoints.join(' L ') + 
+    ` L ${getX(data.length - 1)},${padding.top + graphHeight} Z`;
+
+  svg.innerHTML = `
+    <line x1="${padding.left}" y1="${getY(0)}" x2="${width - padding.right}" y2="${getY(0)}" stroke="var(--border)" stroke-width="1" />
+    <line x1="${padding.left}" y1="${getY(50)}" x2="${width - padding.right}" y2="${getY(50)}" stroke="var(--border)" stroke-width="1" stroke-dasharray="4,4" />
+    <line x1="${padding.left}" y1="${getY(100)}" x2="${width - padding.right}" y2="${getY(100)}" stroke="var(--border)" stroke-width="1" stroke-dasharray="4,4" />
+    
+    <text x="${padding.left - 5}" y="${getY(0)}" fill="var(--text-muted)" font-size="10" text-anchor="end">0%</text>
+    <text x="${padding.left - 5}" y="${getY(50)}" fill="var(--text-muted)" font-size="10" text-anchor="end">50%</text>
+    <text x="${padding.left - 5}" y="${getY(100)}" fill="var(--text-muted)" font-size="10" text-anchor="end">100%</text>
+
+    <path d="${userPathData}" fill="var(--accent)" fill-opacity="0.3" stroke="var(--accent)" stroke-width="2" stroke-linejoin="round" />
+    <path d="${systemPathData}" fill="var(--cyan)" fill-opacity="0.5" stroke="var(--cyan)" stroke-width="2" stroke-linejoin="round" />
+    
+    <rect x="${padding.left}" y="${padding.top}" width="${graphWidth}" height="${graphHeight}" fill="transparent" id="cpuProfilerOverlay" style="cursor: crosshair;" />
+  `;
+
+  const overlay = document.getElementById('cpuProfilerOverlay');
+  overlay.addEventListener('mousemove', (e) => {
+    const rect = svg.getBoundingClientRect();
+    const mouseX = e.clientX - rect.left - padding.left;
+    const index = Math.round((mouseX / graphWidth) * (CPU_PROFILER_MAX_POINTS - 1));
+    
+    if (index >= 0 && index < data.length) {
+      const d = data[index];
+      tooltip.style.opacity = '1';
+      tooltip.style.left = (e.clientX - rect.left + 15) + 'px';
+      tooltip.style.top = (e.clientY - rect.top + 15) + 'px';
+      tooltip.innerHTML = `
+        <div style="font-weight:700; margin-bottom:4px;">PID: ${d.pid}</div>
+        <div style="display:flex; justify-content:space-between; gap:20px;">
+          <span style="color:var(--accent);">User Space:</span>
+          <span class="mono">${d.openclaw_cpu_user.toFixed(1)}%</span>
+        </div>
+        <div style="display:flex; justify-content:space-between; gap:20px;">
+          <span style="color:var(--cyan);">Kernel Space:</span>
+          <span class="mono">${d.openclaw_cpu_system.toFixed(1)}%</span>
+        </div>
+        <div style="margin-top:4px; font-size:10px; color:var(--text-muted);">
+          Total: ${(d.openclaw_cpu_user + d.openclaw_cpu_system).toFixed(1)}%
+        </div>
+      `;
+    }
+  });
+
+  overlay.addEventListener('mouseleave', () => {
+    tooltip.style.opacity = '0';
+  });
+}
+
+function startCpuProfilerMock() {
+  setInterval(() => {
+    const newData = {
+      pid: 4821,
+      is_running: true,
+      openclaw_cpu_user: Math.random() * 40 + 10,
+      openclaw_cpu_system: Math.random() * 15 + 5,
+      timestamp: Date.now()
+    };
+    
+    cpuProfilerData.push(newData);
+    if (cpuProfilerData.length > CPU_PROFILER_MAX_POINTS) {
+      cpuProfilerData.shift();
+    }
+    
+    renderCpuProfiler(cpuProfilerData);
+  }, 1000);
+}
+
+// Initial mock data to avoid empty start
+for (let i = 0; i < CPU_PROFILER_MAX_POINTS; i++) {
+  cpuProfilerData.push({
+    pid: 4821,
+    is_running: true,
+    openclaw_cpu_user: 0,
+    openclaw_cpu_system: 0,
+    timestamp: Date.now() - (CPU_PROFILER_MAX_POINTS - i) * 1000
+  });
+}
+startCpuProfilerMock();
 </script>
 </body>
 </html>
