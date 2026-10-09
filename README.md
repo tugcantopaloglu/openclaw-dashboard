@@ -10,7 +10,7 @@ A beautiful, secure, real-time monitoring dashboard for OpenClaw agents. Track s
 
 ![Dashboard Preview](docs/screenshot.png)
 
- Screenshots
+## Screenshots
 
 | Overview | Sessions | Costs |
 |----------|----------|-------|
@@ -20,7 +20,7 @@ A beautiful, secure, real-time monitoring dashboard for OpenClaw agents. Track s
 |-------------|-----------|------|
 | ![Limits](docs/limits.png) | ![Feed](docs/feed.png) | ![Logs](docs/logs.png) |
 
- Features
+## Features
 
 -  **Session Management** - View all agent sessions with real-time activity status
 -  **Rate Limit Monitoring** - Track Claude and Gemini API usage against rolling windows
@@ -61,7 +61,7 @@ A beautiful, secure, real-time monitoring dashboard for OpenClaw agents. Track s
 -  **Security Hardened** - HSTS, CSP, rate limiting, timing-safe comparisons, audit logging
 -  **Minimal Dependencies** - Pure Node.js, no database or npm packages required. Optional: `jq` (Docker page), `tmux` + `python3` (Claude CLI usage scraper), `docker` (Docker management)
 
- Quick Start
+## Quick Start
 
 ```bash
 # Clone the repository
@@ -77,7 +77,7 @@ node server.js
 
 Visit `http://localhost:7000` in your browser. On first visit, you'll see a **registration screen** where you create your username and password. After registration, log in with your credentials.
 
- Installation
+## Installation
 
 ### Prerequisites
 
@@ -201,7 +201,7 @@ DASHBOARD_TOKEN=my_secret_token_12345 node server.js
 WORKSPACE_DIR=/mnt/data/openclaw node server.js
 ```
 
- Authentication
+## Authentication
 
 The dashboard uses **username and password authentication** with secure server-side sessions.
 
@@ -233,7 +233,7 @@ To prevent brute-force attacks:
 - **20 failed login attempts** → Hard lockout (requires service restart)
 - Rate limits are in-memory and reset when the service restarts
 
- Multi-Factor Authentication (MFA)
+## Multi-Factor Authentication (MFA)
 
 Add an extra layer of security with time-based one-time passwords (TOTP).
 
@@ -248,7 +248,7 @@ Add an extra layer of security with time-based one-time passwords (TOTP).
    - Microsoft Authenticator (iOS, Android)
    - 1Password, Bitwarden, or any TOTP-compatible app
 5. Enter the **6-digit code** shown in your app to verify
-6. MFA is now active! 
+6. MFA is now active!
 
 ### Using MFA
 
@@ -284,7 +284,7 @@ If you lose access to your authenticator app (lost phone, uninstalled app, etc.)
 
 **Important:** Adjust the path `/root/clawd/data/credentials.json` if your workspace is elsewhere.
 
- Password Recovery
+## Password Recovery
 
 ### Forgot Password?
 
@@ -353,7 +353,7 @@ If everything is locked and you can't log in:
 
 **Warning:** This deletes your username, password, and MFA settings. Memory files and audit logs are not affected.
 
- Security Features
+## Security Features
 
 The dashboard is built with security best practices:
 
@@ -376,7 +376,7 @@ The dashboard is built with security best practices:
   - Payload size limits (1MB max)
 - **Automatic backups** - `.bak` files created before overwriting workspace files
 
- Network Security
+## Network Security
 
 The dashboard is designed for **local or Tailscale access**:
 
@@ -408,7 +408,7 @@ DASHBOARD_ALLOW_HTTP=true node server.js
 - Add IP allowlisting
 - Consider VPN (Tailscale, WireGuard) instead
 
- Troubleshooting
+## Troubleshooting
 
 ### "Too many failed attempts"
 
@@ -473,7 +473,7 @@ DASHBOARD_ALLOW_HTTP=true node server.js
   ```bash
   # Add to /etc/systemd/system/agent-dashboard.service.d/override.conf
   Environment=DASHBOARD_ALLOW_HTTP=true
-  
+
   # Reload and restart
   systemctl daemon-reload
   systemctl restart agent-dashboard
@@ -488,7 +488,7 @@ DASHBOARD_ALLOW_HTTP=true node server.js
 - **Clear browser cache** for the dashboard URL
 - **Check browser console** (F12 → Console tab) for JavaScript errors
 
- API Reference
+## API Reference
 
 The dashboard exposes a REST API for programmatic access. All endpoints require authentication via `Authorization: Bearer <sessionToken>` header.
 
@@ -535,7 +535,7 @@ All other endpoints require authentication:
 
 For detailed request/response examples, see the previous version of this README or explore the API in the browser's Network tab.
 
- Data Files
+## Data Files
 
 The dashboard stores data in your workspace directory:
 
@@ -557,7 +557,7 @@ The dashboard stores data in your workspace directory:
 }
 ```
 
- OpenClaw Integration
+## OpenClaw Integration
 
 The dashboard automatically detects:
 - **Sessions** from `$OPENCLAW_DIR/agents/$AGENT_ID/sessions/`
@@ -577,7 +577,7 @@ The dashboard works best when these files exist:
 - `$WORKSPACE_DIR/scripts/scrape-gemini-usage.sh` - Gemini usage scraper
 - `$WORKSPACE_DIR/scripts/parse-gemini-usage.py` - Gemini usage parser
 
- Keyboard Shortcuts
+## Keyboard Shortcuts
 
 | Key | Action |
 |-----|--------|
@@ -595,7 +595,7 @@ The dashboard works best when these files exist:
 | `Esc` | Close modals and overlays |
 | `?` | Show keyboard shortcuts help |
 
- Contributing
+## Contributing
 
 Contributions are welcome! Please follow these guidelines:
 
@@ -635,18 +635,18 @@ OpenClaw installation. CI runs these checks on pushes and pull requests.
 - **No comments** in code (self-documenting)
 - **Brief and direct** function names
 
- License
+## License
 
 MIT License - see [LICENSE](LICENSE) file for details.
 
- Acknowledgments
+## Acknowledgments
 
 - Built with [Claude Code](https://claude.ai)
 - Built for [OpenClaw](https://openclaw.dev)
 - Inspired by modern dashboards (Grafana, Vercel, Railway)
 - Font: [Inter](https://rsms.me/inter/) & [JetBrains Mono](https://www.jetbrains.com/lp/mono/)
 
- Support
+## Support
 
 - **Issues:** [GitHub Issues](https://github.com/tugcantopaloglu/openclaw-dashboard/issues)
 - **Twitter:** [@tugcantopaloglu](https://twitter.com/tugcantopaloglu)
