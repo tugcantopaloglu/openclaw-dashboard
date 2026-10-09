@@ -2041,10 +2041,11 @@ const server = http.createServer((req, res) => {
     }
     if (req.url.startsWith('/api/notifications')) {
       if (!requireAuth(req, res)) return;
-      const limit = parseInt(new URL(req.url, 'http://localhost').searchParams.get('limit') || '50');
+      const requestedLimit = Number(new URL(req.url, 'http://localhost').searchParams.get('limit') || 50);
+      const limit = Number.isInteger(requestedLimit) && requestedLimit > 0 ? Math.min(requestedLimit, 200) : 50;
       try {
         const raw = fs.readFileSync(auditLogPath, 'utf8').trim();
-        const lines = raw.split('\n').filter(Boolean).slice(-Math.min(limit, 200));
+        const lines = raw.split('\n').filter(Boolean).slice(-limit);
         const events = lines.map(l => { try { return JSON.parse(l); } catch { return null; } }).filter(Boolean).reverse();
         res.writeHead(200, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ events }));
@@ -2094,7 +2095,7 @@ const server = http.createServer((req, res) => {
     }
     if (req.url === '/api/sys-security') {
       const { execSync } = require('child_process');
-      const run = (cmd) => { try { return execSync(cmd, { timeout: 10000 }).toString().replace(/</g, '&lt;').replace(/>/g, '&gt;'); } catch(e) { return e.stdout ? e.stdout.toString().replace(/</g, '&lt;').replace(/>/g, '&gt;') : 'Error: ' + e.message; } };
+      const run = (cmd) => { try { return execSync(cmd, { timeout: 10000 }).toString(); } catch(e) { return e.stdout ? e.stdout.toString() : 'Error: ' + e.message; } };
       const data = {
         ufw: run('ufw status verbose 2>&1'),
         ports: run('ss -ltnp 2>&1'),

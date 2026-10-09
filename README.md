@@ -614,7 +614,21 @@ export WORKSPACE_DIR=/path/to/test/workspace
 node server.js
 ```
 
-The dashboard has no build step — edit `server.js` or `index.html` and reload.
+The dashboard has no build step. Edit `server.js` or `index.html` and reload.
+
+### Validation
+
+Use Node.js 20 or 22 to run the dependency-free checks:
+
+```bash
+node --check server.js
+node --test
+```
+
+The tests validate browser script syntax, safe rendering of audit events, search
+results and command output, authentication, and notification pagination. Server
+tests use a temporary workspace and never restart services or change the active
+OpenClaw installation. CI runs these checks on pushes and pull requests.
 
 ### Code Style
 

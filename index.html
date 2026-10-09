@@ -4385,7 +4385,7 @@ function connectLiveFeed() {
     const seen = new Set();
     sessions.forEach(s => {
       const label = s.label || s.key.split(':').slice(2).join(':') || s.key;
-      if (!seen.has(label)) { seen.add(label); opts.push(`<option value="${label}">${label}</option>`); }
+      if (!seen.has(label)) { seen.add(label); opts.push(`<option value="${escapeHtml(label)}">${escapeHtml(label)}</option>`); }
     });
     sel.innerHTML = opts.join('');
     sel.value = current || 'all';
@@ -4442,12 +4442,12 @@ function connectLiveFeed() {
       item.innerHTML = `
         <div class="feed-header-line">
           <div style="display:flex;align-items:center;gap:8px;">
-            <span style="background:${sessionColor};color:#fff;padding:1px 8px;border-radius:10px;font-size:10px;font-weight:600;letter-spacing:0.02em;">${sessionName}</span>
-            <span class="feed-role ${roleClass}">${roleLabel}</span>
+            <span style="background:${sessionColor};color:#fff;padding:1px 8px;border-radius:10px;font-size:10px;font-weight:600;letter-spacing:0.02em;">${escapeHtml(sessionName)}</span>
+            <span class="feed-role ${escapeHtml(roleClass)}">${escapeHtml(roleLabel)}</span>
           </div>
           <span class="feed-time">${time}</span>
         </div>
-        <div class="feed-content">${(data.content || '').replace(/</g,'&lt;')}</div>
+        <div class="feed-content">${escapeHtml(data.content)}</div>
       `;
       
       feed.insertBefore(item, feed.firstChild);
@@ -4936,10 +4936,14 @@ function clearFeedSearch() {
 }
 
 function highlightText(text, term) {
-  if (!term) return text;
+  if (!term) return escapeHtml(text);
   const idx = text.toLowerCase().indexOf(term);
-  if (idx === -1) return text;
-  return text.substring(0, idx) + '<span class="search-highlight">' + text.substring(idx, idx + term.length) + '</span>' + text.substring(idx + term.length);
+  if (idx === -1) return escapeHtml(text);
+  return escapeHtml(text.substring(0, idx)) + '<span class="search-highlight">' + escapeHtml(text.substring(idx, idx + term.length)) + '</span>' + escapeHtml(text.substring(idx + term.length));
+}
+
+function escapeHtml(value) {
+  return String(value ?? '').replace(/[&<>"']/g, character => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[character]));
 }
 
 // Session comparison
@@ -5090,7 +5094,7 @@ function showToast(message, type = 'info', duration = 4000) {
   toast.innerHTML = `
     <div class="toast-icon">${icons[type] || icons.info}</div>
     <div class="toast-content">
-      <div class="toast-message">${message}</div>
+      <div class="toast-message">${escapeHtml(message)}</div>
     </div>
   `;
   
@@ -5172,7 +5176,7 @@ async function fetchTailscaleStatus() {
     if (!statusEl) return;
     
     if (data.error) {
-      statusEl.innerHTML = `<div style="color:var(--text-muted);">${data.error}</div>`;
+      statusEl.innerHTML = `<div style="color:var(--text-muted);">${escapeHtml(data.error)}</div>`;
       return;
     }
     
@@ -5186,15 +5190,15 @@ async function fetchTailscaleStatus() {
       </div>
       <div style="display:flex;justify-content:space-between;padding:8px 0;border-bottom:1px solid var(--border);">
         <span style="color:var(--text-muted);">Device</span>
-        <span class="mono" style="font-size:13px;">${data.hostname}</span>
+        <span class="mono" style="font-size:13px;">${escapeHtml(data.hostname)}</span>
       </div>
       <div style="display:flex;justify-content:space-between;padding:8px 0;border-bottom:1px solid var(--border);">
         <span style="color:var(--text-muted);">Tailnet IP</span>
-        <span class="mono" style="font-size:13px;">${data.ip}</span>
+        <span class="mono" style="font-size:13px;">${escapeHtml(data.ip)}</span>
       </div>
       <div style="display:flex;justify-content:space-between;padding:8px 0;">
         <span style="color:var(--text-muted);">Connected Peers</span>
-        <span style="font-weight:600;">${data.peers}</span>
+        <span style="font-weight:600;">${escapeHtml(data.peers)}</span>
       </div>
     `;
     
@@ -5202,7 +5206,7 @@ async function fetchTailscaleStatus() {
       html += `
         <div style="margin-top:12px;padding-top:12px;border-top:1px solid var(--border);">
           <div style="font-size:11px;color:var(--text-muted);margin-bottom:6px;text-transform:uppercase;">Active Routes</div>
-          ${data.routes.map(r => `<div style="font-size:11px;font-family:'JetBrains Mono',monospace;color:var(--text-secondary);margin-bottom:4px;">${r}</div>`).join('')}
+          ${data.routes.map(r => `<div style="font-size:11px;font-family:'JetBrains Mono',monospace;color:var(--text-secondary);margin-bottom:4px;">${escapeHtml(r)}</div>`).join('')}
         </div>
       `;
     }
@@ -5329,7 +5333,7 @@ async function fetchLogs() {
     viewer.textContent = logs;
     viewer.scrollTop = viewer.scrollHeight;
   } catch (e) {
-    viewer.innerHTML = '<div style="color:var(--red);">Failed to load logs: ' + e.message + '</div>';
+    viewer.textContent = 'Failed to load logs: ' + e.message;
   }
 }
 
@@ -5466,11 +5470,11 @@ async function fetchSysSecurity() {
   try {
     const res = await authFetch(API_BASE + '/api/sys-security');
     const data = await res.json();
-    document.getElementById('secUfw').innerHTML = data.ufw || 'N/A';
-    document.getElementById('secPorts').innerHTML = data.ports || 'N/A';
-    document.getElementById('secF2b').innerHTML = data.fail2ban || 'N/A';
-    document.getElementById('secSsh').innerHTML = data.ssh || 'N/A';
-    document.getElementById('secAudit').innerHTML = data.audit || 'N/A';
+    document.getElementById('secUfw').textContent = data.ufw || 'N/A';
+    document.getElementById('secPorts').textContent = data.ports || 'N/A';
+    document.getElementById('secF2b').textContent = data.fail2ban || 'N/A';
+    document.getElementById('secSsh').textContent = data.ssh || 'N/A';
+    document.getElementById('secAudit').textContent = data.audit || 'N/A';
   } catch(e) { showToast('Security fetch error: ' + e.message, 'warning'); }
 }
 
@@ -5594,15 +5598,15 @@ async function loadDocker() {
           const running = c.State === 'running';
           const dot = running ? '🟢' : '🔴';
           return '<tr style="border-bottom:1px solid var(--border);">' +
-            '<td style="padding:6px;">' + dot + ' ' + (c.Names || '') + '</td>' +
-            '<td style="padding:6px;color:var(--text-secondary);max-width:200px;overflow:hidden;text-overflow:ellipsis;">' + (c.Image || '') + '</td>' +
-            '<td style="padding:6px;color:var(--text-secondary);">' + (c.Status || '') + '</td>' +
-            '<td style="padding:6px;color:var(--text-muted);font-size:11px;">' + (c.Ports || '-') + '</td>' +
+            '<td style="padding:6px;">' + dot + ' ' + escapeHtml(c.Names) + '</td>' +
+            '<td style="padding:6px;color:var(--text-secondary);max-width:200px;overflow:hidden;text-overflow:ellipsis;">' + escapeHtml(c.Image) + '</td>' +
+            '<td style="padding:6px;color:var(--text-secondary);">' + escapeHtml(c.Status) + '</td>' +
+            '<td style="padding:6px;color:var(--text-muted);font-size:11px;">' + escapeHtml(c.Ports || '-') + '</td>' +
             '<td style="padding:6px;text-align:center;">' +
             (running
-              ? '<button onclick="dockerAction(\'stop\',\'' + (c.Names||'') + '\')" style="padding:3px 8px;background:var(--bg-secondary);border:1px solid var(--border);border-radius:4px;color:var(--red);cursor:pointer;font-size:11px;margin-right:4px;">Stop</button>' +
-                '<button onclick="dockerAction(\'restart\',\'' + (c.Names||'') + '\')" style="padding:3px 8px;background:var(--bg-secondary);border:1px solid var(--border);border-radius:4px;color:var(--yellow);cursor:pointer;font-size:11px;">Restart</button>'
-              : '<button onclick="dockerAction(\'start\',\'' + (c.Names||'') + '\')" style="padding:3px 8px;background:var(--bg-secondary);border:1px solid var(--border);border-radius:4px;color:var(--green);cursor:pointer;font-size:11px;">Start</button>') +
+              ? '<button onclick="dockerAction(\'stop\',' + escapeHtml(JSON.stringify(c.Names || '')) + ')" style="padding:3px 8px;background:var(--bg-secondary);border:1px solid var(--border);border-radius:4px;color:var(--red);cursor:pointer;font-size:11px;margin-right:4px;">Stop</button>' +
+                '<button onclick="dockerAction(\'restart\',' + escapeHtml(JSON.stringify(c.Names || '')) + ')" style="padding:3px 8px;background:var(--bg-secondary);border:1px solid var(--border);border-radius:4px;color:var(--yellow);cursor:pointer;font-size:11px;">Restart</button>'
+              : '<button onclick="dockerAction(\'start\',' + escapeHtml(JSON.stringify(c.Names || '')) + ')" style="padding:3px 8px;background:var(--bg-secondary);border:1px solid var(--border);border-radius:4px;color:var(--green);cursor:pointer;font-size:11px;">Start</button>') +
             '</td></tr>';
         }).join('') + '</table>';
     } else { ce.innerHTML = '<div style="color:var(--text-muted);font-size:13px;">No containers found</div>'; }
@@ -5612,9 +5616,9 @@ async function loadDocker() {
       ie.innerHTML = '<table style="width:100%;font-size:12px;border-collapse:collapse;">' +
         '<tr style="border-bottom:1px solid var(--border);"><th style="text-align:left;padding:6px;">Repository</th><th style="text-align:left;padding:6px;">Tag</th><th style="text-align:left;padding:6px;">Size</th></tr>' +
         data.images.map(i => '<tr style="border-bottom:1px solid var(--border);">' +
-          '<td style="padding:6px;">' + (i.Repository || '') + '</td>' +
-          '<td style="padding:6px;color:var(--text-secondary);">' + (i.Tag || '') + '</td>' +
-          '<td style="padding:6px;color:var(--text-muted);">' + (i.Size || '') + '</td></tr>'
+          '<td style="padding:6px;">' + escapeHtml(i.Repository) + '</td>' +
+          '<td style="padding:6px;color:var(--text-secondary);">' + escapeHtml(i.Tag) + '</td>' +
+          '<td style="padding:6px;color:var(--text-muted);">' + escapeHtml(i.Size) + '</td></tr>'
         ).join('') + '</table>';
     } else { ie.innerHTML = '<div style="color:var(--text-muted);font-size:13px;">No images found</div>'; }
 
@@ -5647,9 +5651,9 @@ async function fetchNotifications() {
     body.innerHTML = data.events.map(e => {
       const icon = notifIcons[e.event] || '📋';
       const time = e.timestamp ? new Date(e.timestamp).toLocaleString() : '';
-      const detail = e.username ? ' (' + e.username + ')' : '';
-      const ip = e.ip ? ' from ' + e.ip : '';
-      return '<div class="notif-item"><div class="notif-icon">' + icon + '</div><div class="notif-content"><div class="notif-event">' + (e.event||'').replace(/_/g, ' ') + detail + ip + '</div><div class="notif-time">' + time + '</div></div></div>';
+      const detail = e.username ? ' (' + escapeHtml(e.username) + ')' : '';
+      const ip = e.ip ? ' from ' + escapeHtml(e.ip) : '';
+      return '<div class="notif-item"><div class="notif-icon">' + icon + '</div><div class="notif-content"><div class="notif-event">' + escapeHtml(String(e.event || '').replace(/_/g, ' ')) + detail + ip + '</div><div class="notif-time">' + escapeHtml(time) + '</div></div></div>';
     }).join('');
     if (data.events.length) {
       notifLastSeen = data.events[0].timestamp;
