@@ -20,7 +20,9 @@ jobs:
           node-version: ${{ matrix.node }}
       - run: node --check server.js
       - run: node --test
-      - run: bash -n install.sh scripts/scrape-claude-usage.sh
+      - run: |
+          bash -n install.sh
+          bash -n scripts/scrape-claude-usage.sh
 
   docker:
     runs-on: ubuntu-latest

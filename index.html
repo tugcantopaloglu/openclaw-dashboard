@@ -2297,6 +2297,7 @@ let resolveReauth = null;
 let rejectReauth = null;
 let reauthSubmitting = false;
 let reauthReturnFocus = null;
+let _currentKeyFileRaw = '';
 const TOKEN_KEY = 'dashboardToken';
 const TOKEN_EXPIRY_KEY = 'dashboardTokenExpiry';
 const TOKEN_LIFETIME = 24 * 60 * 60 * 1000;
@@ -4747,7 +4748,6 @@ window.loadMemoryFile = async function(name) {
 let keyFiles = [];
 let currentKeyFile = null;
 let keyFileEditing = false;
-let _currentKeyFileRaw = '';
 
 window.fetchKeyFiles = async function fetchKeyFiles() {
   try {
