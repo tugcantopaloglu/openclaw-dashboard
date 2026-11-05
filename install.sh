@@ -7,15 +7,15 @@ echo ""
 
 # Check for Node.js
 if ! command -v node &> /dev/null; then
-  echo "❌ Node.js not found. Please install Node.js v18+ first:"
-  echo "   curl -fsSL https://deb.nodesource.com/setup_18.x | sudo -E bash -"
+  echo "❌ Node.js not found. Please install a supported Node.js LTS release (v22+):"
+  echo "   curl -fsSL https://deb.nodesource.com/setup_24.x | sudo -E bash -"
   echo "   sudo apt-get install -y nodejs"
   exit 1
 fi
 
 NODE_VERSION=$(node --version | cut -d'v' -f2 | cut -d'.' -f1)
-if [ "$NODE_VERSION" -lt 18 ]; then
-  echo "❌ Node.js version is too old (need v18+, have v$NODE_VERSION)"
+if [ "$NODE_VERSION" -lt 22 ]; then
+  echo "❌ Node.js version is too old (need v22+, have v$NODE_VERSION)"
   exit 1
 fi
 
@@ -77,6 +77,8 @@ fi
 DASHBOARD_PORT="${DASHBOARD_PORT:-7000}"
 read -p "Dashboard port (default: $DASHBOARD_PORT): " input
 DASHBOARD_PORT="${input:-$DASHBOARD_PORT}"
+DASHBOARD_HOST="${DASHBOARD_HOST:-0.0.0.0}"
+DASHBOARD_AUTH_DIR="${DASHBOARD_AUTH_DIR:-$WORKSPACE_DIR/data}"
 
 # Copy scraper scripts to workspace if not present
 SCRIPTS_DIR="$WORKSPACE_DIR/scripts"
@@ -102,7 +104,7 @@ echo "Install Dir:   $(pwd)"
 echo ""
 echo "🔐 Authentication"
 echo "  On first visit, you'll create a username and password."
-echo "  A recovery token will be printed in the service logs."
+echo "  A recovery token will be saved privately in $DASHBOARD_AUTH_DIR/recovery-token.txt."
 echo "  Optional: enable TOTP (2FA) from the Security page."
 echo ""
 
@@ -124,11 +126,14 @@ After=network.target
 [Service]
 Type=simple
 User=$USER
-WorkingDirectory=$(pwd)
-ExecStart=$(which node) $(pwd)/server.js
+WorkingDirectory=\"$(pwd)\"
+ExecStart=\"$(which node)\" \"$(pwd)/server.js\"
 Environment=DASHBOARD_PORT=$DASHBOARD_PORT
-Environment=WORKSPACE_DIR=$WORKSPACE_DIR
-Environment=OPENCLAW_DIR=$OPENCLAW_DIR
+Environment=DASHBOARD_HOST=$DASHBOARD_HOST
+Environment=\"WORKSPACE_DIR=$WORKSPACE_DIR\"
+Environment=\"OPENCLAW_DIR=$OPENCLAW_DIR\"
+Environment=\"DASHBOARD_AUTH_DIR=$DASHBOARD_AUTH_DIR\"
+UMask=0077
 Restart=always
 RestartSec=5
 
@@ -173,7 +178,8 @@ if sudo systemctl is-active --quiet agent-dashboard; then
   echo "  3. (Optional) Enable TOTP 2FA from the Security page"
   echo ""
   echo "🔑 Recovery token (for password reset):"
-  echo "  Check service logs: journalctl -u agent-dashboard | grep 'Recovery Token'"
+  echo "  Read the private file: $DASHBOARD_AUTH_DIR/recovery-token.txt"
+  echo "  The token is never printed to service logs."
   echo ""
   echo "Useful commands:"
   echo "  sudo systemctl status agent-dashboard   # Check status"

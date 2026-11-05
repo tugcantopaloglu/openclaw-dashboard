@@ -1,3 +1,62 @@
+# OpenClaw Dashboard v3.0.1 - Security and Cost Accuracy
+
+## Security fixes
+
+- Escape session messages and metadata, git activity, cron names, model names,
+  file names and previews before rendering. Preserve working action handlers
+  without inserting untrusted text into executable JavaScript.
+- Enforce fresh password/TOTP verification on the server for configuration and
+  system-security endpoints. Grants are session-bound and expire after five
+  minutes; failed verification and MFA changes invalidate existing grants.
+- Run git activity commands with an argument array instead of a shell string.
+- Persist recovery tokens in the private auth directory with owner-only file
+  permissions. Never print token values to startup or service logs.
+- Accept HTTPS forwarded headers only from loopback or explicitly trusted proxy
+  addresses. Preserve configurable LAN, Tailscale and Docker bind behavior.
+- Use the configured OpenClaw directory consistently for config access, and save
+  configuration and backups atomically with private permissions.
+
+## Cost accuracy
+
+- Integrate PR #31 with provider-independent model aliases, provider prefixes,
+  snapshot handling and explicit custom-price precedence. Fixes #30.
+- Correct Opus 4.5/4.6 prices, add verified Claude generations, correct legacy
+  OpenAI cache pricing and Gemini Flash text pricing. Addresses #40 using official
+  provider sources rather than copying the proposed rates verbatim.
+- Price explicit five-minute and one-hour Anthropic cache writes separately.
+- Distinguish unpriced usage from free usage in sessions, model breakdowns and
+  totals while retaining existing numeric API fields.
+- Accumulate active and reset session files without overwriting session totals.
+
+## Compatibility and validation
+
+- Integrate PR #41 while retaining reachable Docker-published ports.
+- Fix quick actions and cron requests under reverse-proxy subpaths.
+- Test supported Node.js LTS versions 22, 24 and 26, plus a Docker build and
+  published-port smoke test. Expand security, rendering and pricing regressions.
+- Update install/recovery instructions, add the MIT license file, security
+  reporting guidance and a reproducible bug-report template.
+
+## Upgrade notes
+
+Pull the release, restart the dashboard and refresh the browser. If building a
+container, rebuild the image so the new `lib/` modules are included.
+
+- No credential or agent-session migration is required. Preserve the auth/data
+  directory and any existing `DASHBOARD_TOKEN` configuration.
+- Find the generated recovery token in `$DASHBOARD_AUTH_DIR/recovery-token.txt`
+  (default `$WORKSPACE_DIR/data/recovery-token.txt`), not in service logs.
+- API clients reading configuration or system-security information must call
+  `POST /api/reauth` in the same session first. Expired grants return
+  `403 REAUTH_REQUIRED`; the dashboard handles this automatically.
+- For a proxy on a separate host/container, set `DASHBOARD_TRUSTED_PROXIES` to its
+  exact backend-facing IP and keep the backend port private. Native deployments
+  can set `DASHBOARD_HOST=127.0.0.1`; containers retain `0.0.0.0` internally.
+- Recomputed estimates may change when provider-reported positive costs are
+  unavailable. Explicit custom rates and provider-reported costs remain primary.
+
+---
+
 # OpenClaw Dashboard v3.0.0 - Release Notes
 
 ## 🎨 UI & Theming

@@ -1935,6 +1935,7 @@ body.light-theme ::selection { background: rgba(99,102,241,0.2); }
       <div class="grid grid-2">
         <div class="card">
           <h3 class="card-title">Cost by Model</h3>
+          <p id="costPricingWarning" role="status" style="display:none;color:var(--yellow);font-size:12px;margin-bottom:12px;"></p>
           <div id="costByModel"></div>
         </div>
         <div class="card">
@@ -2291,7 +2292,11 @@ function getApiBasePath() {
 }
 
 const API_BASE = getApiBasePath();
-let sysSecAuthed = false;
+let pendingReauth = null;
+let resolveReauth = null;
+let rejectReauth = null;
+let reauthSubmitting = false;
+let reauthReturnFocus = null;
 const TOKEN_KEY = 'dashboardToken';
 const TOKEN_EXPIRY_KEY = 'dashboardTokenExpiry';
 const TOKEN_LIFETIME = 24 * 60 * 60 * 1000;
@@ -2331,6 +2336,12 @@ function setStoredToken(token, rememberMe = false) {
 }
 
 function clearStoredToken() {
+  resetReauthentication();
+  for (const id of ['configTextarea', 'secUfw', 'secPorts', 'secF2b', 'secSsh', 'secAudit', 'keyFileContent', 'keyFileEditor']) {
+    const element = document.getElementById(id);
+    if (element) { element.textContent = ''; if ('value' in element) element.value = ''; }
+  }
+  if (typeof _currentKeyFileRaw !== 'undefined') _currentKeyFileRaw = '';
   localStorage.removeItem(TOKEN_KEY);
   localStorage.removeItem(TOKEN_EXPIRY_KEY);
   sessionStorage.removeItem(TOKEN_KEY);
@@ -2584,6 +2595,7 @@ async function handleRecovery(event) {
     try { data = await res.json(); } catch (e) { data = {}; }
 
     if (res.ok && data.success) {
+      clearStoredToken();
       showToast('Password reset successfully! Please login.', 'success');
       showLoginForm();
     } else {
@@ -2690,6 +2702,7 @@ function showApp() {
 }
 
 function showLogin() {
+  resetReauthentication();
   document.getElementById('loginPage').style.display = 'flex';
   document.getElementById('mainApp').style.display = 'none';
 }
@@ -2726,27 +2739,37 @@ async function checkAuth() {
   }
 }
 
-function authFetch(url, options = {}) {
+async function authFetch(url, options = {}) {
   const token = getStoredToken();
   if (!token) {
     showLogin();
     throw new Error('Not authenticated');
   }
   
-  options.headers = options.headers || {};
-  options.headers['Authorization'] = `Bearer ${token}`;
-  if (typeof options.cache === 'undefined') {
-    options.cache = 'no-store';
-  }
-  
-  return fetch(url, options).then(res => {
+  const requestOptions = {
+    ...options,
+    headers: { ...options.headers, Authorization: `Bearer ${token}` },
+    cache: options.cache === undefined ? 'no-store' : options.cache
+  };
+  // The server owns the five-minute grant. A cached client flag cannot authorize access.
+  for (let attempt = 0; attempt < 2; attempt++) {
+    const res = await fetch(url, requestOptions);
     if (res.status === 401) {
       clearStoredToken();
       showLogin();
       throw new Error('Session expired');
     }
+    if (res.status === 403 && attempt === 0) {
+      const data = await res.clone().json().catch(() => ({}));
+      if (data.code === 'REAUTH_REQUIRED') {
+        await requestReauthentication();
+        const currentToken = getStoredToken();
+        if (!currentToken || currentToken !== token) throw new Error('Session changed. Please try again.');
+        continue;
+      }
+    }
     return res;
-  });
+  }
 }
 
 const qrcodegen = (function() {
@@ -3221,7 +3244,6 @@ let notificationsEnabled = false;
 document.querySelectorAll('.nav-item').forEach(item => {
   item.addEventListener('click', () => {
     const page = item.dataset.page;
-    if ((page === 'sys-security' || page === 'security' || page === 'config-editor') && !sysSecAuthed) { showReauthModal(page); return; }
     document.querySelectorAll('.nav-item').forEach(i => i.classList.remove('active'));
     item.classList.add('active');
     document.querySelectorAll('.page').forEach(p => p.classList.remove('active'));
@@ -3433,9 +3455,9 @@ function updateOverview() {
                       s.key.includes('cron') ? 'cron' :
                       s.kind === 'group' ? 'group' : 'main';
     
-    const tokens = s.totalTokens || 0;
+    const tokens = Number(s.totalTokens) || 0;
     const tokStr = tokens >= 1000 ? (tokens / 1000).toFixed(0) + 'k' : tokens;
-    const costStr = s.cost > 0 ? '$' + s.cost.toFixed(2) : '';
+    const costStr = s.costKnown === false || s.cost > 0 ? sessionCostLabel(s) : '';
     const snippet = s.lastMessage ? s.lastMessage : '';
     
     const dur = s.createdAt ? Date.now() - s.createdAt : 0;
@@ -3444,16 +3466,16 @@ function updateOverview() {
                    dur > 60000 ? Math.floor(dur / 60000) + 'm' : '';
     
     return `
-      <div class="activity-item type-${typeClass} ${isActive ? 'running' : ''}" onclick="openSessionDetail('${s.key}')">
+      <div class="activity-item type-${typeClass} ${isActive ? 'running' : ''}" onclick="openSessionDetail(${htmlJsArg(s.key)})">
         <div class="activity-dot ${isActive ? 'running' : ''}"></div>
         <div class="activity-content">
           <div class="activity-header">
-            <div style="display:flex;align-items:center;gap:6px"><span class="activity-name">${s.label}</span><span class="badge ${badgeText}">${badgeText}</span></div>
+            <div style="display:flex;align-items:center;gap:6px"><span class="activity-name">${escapeHtml(s.label)}</span><span class="badge ${badgeText}">${badgeText}</span></div>
             <span style="font-size:11px;color:var(--text-muted);flex-shrink:0">${ago}</span>
           </div>
-          ${snippet ? `<div class="activity-snippet">${snippet}</div>` : ''}
+          ${snippet ? `<div class="activity-snippet">${escapeHtml(snippet)}</div>` : ''}
           <div class="activity-meta">
-            <span>${s.model.split('/').pop()}</span>
+            <span>${escapeHtml(s.model.split('/').pop())}</span>
             <span>${tokStr} tok</span>
             ${costStr ? `<span>${costStr}</span>` : ''}
             ${durStr ? `<span>⏱ ${durStr}</span>` : ''}
@@ -3500,20 +3522,20 @@ let _msgPollTimer = null;
 function refreshExpandedMessages(key) {
   const s = sessions.find(x => x.key === key);
   if (!s) return;
-  const el = document.getElementById('expanded-msgs-' + CSS.escape(key));
+  const el = document.getElementById('expanded-msgs-' + key);
   if (!el) { expandedSessionKey = null; return; }
   authFetch(API_BASE + '/api/session-messages?id=' + encodeURIComponent(s.sessionId || s.key))
     .then(r => r.json())
     .then(msgs => {
-      if (!document.getElementById('expanded-msgs-' + CSS.escape(key))) return;
+      if (!document.getElementById('expanded-msgs-' + key)) return;
       const last10 = msgs.slice(-10);
       el.innerHTML = last10.map(m => {
         const roleColor = m.role === 'user' ? 'var(--blue)' : m.role === 'assistant' ? 'var(--green)' : 'var(--yellow)';
         const time = m.timestamp ? new Date(m.timestamp).toLocaleTimeString('en',{hour:'2-digit',minute:'2-digit'}) : '';
         return `<div style="padding:6px 0;border-bottom:1px solid var(--border);">
-          <span style="font-weight:600;color:${roleColor};text-transform:uppercase;font-size:10px;margin-right:8px;">${m.role}</span>
+          <span style="font-weight:600;color:${roleColor};text-transform:uppercase;font-size:10px;margin-right:8px;">${escapeHtml(m.role)}</span>
           <span style="color:var(--text-muted);font-size:10px;">${time}</span>
-          <div style="color:var(--text-primary);line-height:1.4;word-break:break-word;font-family:'JetBrains Mono',monospace;font-size:11px;margin-top:2px;">${m.content.replace(/</g,'&lt;')}</div>
+          <div style="color:var(--text-primary);line-height:1.4;word-break:break-word;font-family:'JetBrains Mono',monospace;font-size:11px;margin-top:2px;">${escapeHtml(m.content)}</div>
         </div>`;
       }).join('') || '<div style="color:var(--text-muted);">No messages</div>';
     }).catch(() => {});
@@ -3634,7 +3656,9 @@ function updateSessionsStats(filtered) {
   const totalCost = filtered.reduce((sum, s) => sum + (s.cost || 0), 0);
   document.getElementById('statsSessionCount').textContent = filtered.length;
   document.getElementById('statsTotalTokens').textContent = totalTokens >= 1000000 ? (totalTokens / 1000000).toFixed(1) + 'M' : totalTokens >= 1000 ? (totalTokens / 1000).toFixed(0) + 'k' : totalTokens;
-  document.getElementById('statsTotalCost').textContent = '$' + totalCost.toFixed(2);
+  const unpriced = filtered.filter(s => s.costKnown === false).length;
+  document.getElementById('statsTotalCost').textContent = '$' + totalCost.toFixed(2) + (unpriced ? ' + Unpriced' : '');
+  document.getElementById('statsTotalCost').title = unpriced ? unpriced + ' sessions include unpriced messages' : '';
 }
 
 function renderTimeline(filtered) {
@@ -3665,7 +3689,7 @@ function renderTimeline(filtered) {
     const rightPct = Math.min(((s.updatedAt - start) / rangeMs) * 100, 100);
     const widthPct = Math.max(rightPct - leftPct, 1);
     return `<div style="display:flex;align-items:center;gap:8px;margin-bottom:6px;">
-      <div style="width:100px;flex-shrink:0;font-size:11px;font-weight:500;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;text-align:right;color:var(--text-secondary);">${s.label}</div>
+      <div style="width:100px;flex-shrink:0;font-size:11px;font-weight:500;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;text-align:right;color:var(--text-secondary);">${escapeHtml(s.label)}</div>
       <div style="flex:1;height:14px;background:var(--bg-primary);border-radius:4px;position:relative;overflow:hidden;">
         <div style="position:absolute;left:${leftPct}%;width:${widthPct}%;height:100%;background:${color};border-radius:4px;opacity:0.8;"></div>
       </div>
@@ -3677,7 +3701,7 @@ function renderTimeline(filtered) {
 
 function toggleSessionExpand(key, e) {
   if (e) e.stopPropagation();
-  const existing = document.getElementById('expanded-' + CSS.escape(key));
+  const existing = document.getElementById('expanded-' + key);
   if (existing) {
     existing.remove();
     expandedSessionKey = null;
@@ -3704,19 +3728,19 @@ function toggleSessionExpand(key, e) {
   detail.style.cssText = 'padding:16px 20px;background:var(--bg-tertiary);border-bottom:1px solid var(--border);animation:fadeIn 0.2s ease;';
   detail.innerHTML = `
     <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:12px;margin-bottom:16px;">
-      <div><div style="font-size:10px;color:var(--text-muted);text-transform:uppercase;">Session Key</div><div class="mono" style="font-size:11px;word-break:break-all;">${s.key}</div></div>
-      <div><div style="font-size:10px;color:var(--text-muted);text-transform:uppercase;">Model</div><div class="mono" style="font-size:12px;color:${modelColor};">${s.model.split('/').pop()}</div></div>
-      <div><div style="font-size:10px;color:var(--text-muted);text-transform:uppercase;">Tokens</div><div class="mono" style="font-size:12px;">${(s.totalTokens||0).toLocaleString()}</div></div>
-      <div><div style="font-size:10px;color:var(--text-muted);text-transform:uppercase;">Cost</div><div class="mono" style="font-size:12px;">$${(s.cost||0).toFixed(2)}</div></div>
-      <div><div style="font-size:10px;color:var(--text-muted);text-transform:uppercase;">Channel</div><div style="font-size:12px;">${s.channel||'--'}</div></div>
+      <div><div style="font-size:10px;color:var(--text-muted);text-transform:uppercase;">Session Key</div><div class="mono" style="font-size:11px;word-break:break-all;">${escapeHtml(s.key)}</div></div>
+      <div><div style="font-size:10px;color:var(--text-muted);text-transform:uppercase;">Model</div><div class="mono" style="font-size:12px;color:${modelColor};">${escapeHtml(s.model.split('/').pop())}</div></div>
+      <div><div style="font-size:10px;color:var(--text-muted);text-transform:uppercase;">Tokens</div><div class="mono" style="font-size:12px;">${escapeHtml((s.totalTokens||0).toLocaleString())}</div></div>
+      <div><div style="font-size:10px;color:var(--text-muted);text-transform:uppercase;">Cost</div><div class="mono" style="font-size:12px;">${sessionCostLabel(s)}</div></div>
+      <div><div style="font-size:10px;color:var(--text-muted);text-transform:uppercase;">Channel</div><div style="font-size:12px;">${escapeHtml(s.channel||'--')}</div></div>
       <div><div style="font-size:10px;color:var(--text-muted);text-transform:uppercase;">Created</div><div style="font-size:12px;">${createdAgo}</div></div>
       <div><div style="font-size:10px;color:var(--text-muted);text-transform:uppercase;">Last Active</div><div style="font-size:12px;">${ago}</div></div>
     </div>
     <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px;">
       <span style="font-size:11px;font-weight:600;color:var(--text-secondary);text-transform:uppercase;letter-spacing:0.05em;">Recent Messages</span>
-      <button onclick="openSessionDetail('${s.key}')" style="background:var(--accent);color:white;border:none;padding:4px 12px;border-radius:6px;font-size:11px;font-weight:600;cursor:pointer;">Full View</button>
+      <button onclick="openSessionDetail(${htmlJsArg(s.key)})" style="background:var(--accent);color:white;border:none;padding:4px 12px;border-radius:6px;font-size:11px;font-weight:600;cursor:pointer;">Full View</button>
     </div>
-    <div id="expanded-msgs-${CSS.escape(key)}" style="font-size:12px;color:var(--text-muted);">Loading...</div>`;
+    <div id="${escapeHtml('expanded-msgs-' + key)}" style="font-size:12px;color:var(--text-muted);">Loading...</div>`;
   row.after(detail);
 
   refreshExpandedMessages(key);
@@ -3754,24 +3778,24 @@ function updateSessions() {
     const shortModel = s.model.split('/').pop();
     const modelColor = getModelColor(s.model);
     const activeIndicator = isActive ? ' <span style="display:inline-flex;align-items:center;gap:3px;padding:1px 5px;background:rgba(16,185,129,0.15);color:var(--green);border-radius:4px;font-size:9px;font-weight:600;vertical-align:middle;">●&thinsp;LIVE</span>' : '';
-    const costStr = s.cost > 0 ? '$' + s.cost.toFixed(2) : '-';
+    const costStr = sessionCostLabel(s);
     const lastMsg = s.lastMessage ? s.lastMessage.substring(0, 60) + (s.lastMessage.length > 60 ? '…' : '') : '';
-    const escapedKey = s.key.replace(/'/g, "\\'");
+    const escapedKey = htmlJsArg(s.key);
     const checked = selectedSessions.has(s.key) ? 'checked' : '';
 
     return `
-      <div class="table-row ${statusClass}" data-session-key="${s.key}">
-        <div class="table-cell"><input type="checkbox" class="session-checkbox" ${checked} onchange="toggleSessionCompare('${escapedKey}', this.checked)" onclick="event.stopPropagation()"></div>
-        <div class="table-cell" onclick="toggleSessionExpand('${escapedKey}', event)">${statusDot}</div>
-        <div class="table-cell" style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" onclick="toggleSessionExpand('${escapedKey}', event)">
-          <strong>${s.label}</strong>${activeIndicator}
+      <div class="table-row ${statusClass}" data-session-key="${escapeHtml(s.key)}">
+        <div class="table-cell"><input type="checkbox" class="session-checkbox" ${checked} onchange="toggleSessionCompare(${escapedKey}, this.checked)" onclick="event.stopPropagation()"></div>
+        <div class="table-cell" onclick="toggleSessionExpand(${escapedKey}, event)">${statusDot}</div>
+        <div class="table-cell" style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" onclick="toggleSessionExpand(${escapedKey}, event)">
+          <strong>${escapeHtml(s.label)}</strong>${activeIndicator}
         </div>
-        <div class="table-cell" onclick="toggleSessionExpand('${escapedKey}', event)"><span class="badge ${typeClass}">${typeClass}</span></div>
-        <div class="table-cell mono" style="color:${modelColor};" onclick="toggleSessionExpand('${escapedKey}', event)">${shortModel}</div>
-        <div class="table-cell mono" onclick="toggleSessionExpand('${escapedKey}', event)">${(s.totalTokens||0).toLocaleString()}</div>
-        <div class="table-cell mono" onclick="toggleSessionExpand('${escapedKey}', event)">${costStr}</div>
-        <div class="table-cell" style="font-size:11px;color:var(--text-muted);font-family:'JetBrains Mono',monospace;" onclick="toggleSessionExpand('${escapedKey}', event)">${lastMsg}</div>
-        <div class="table-cell" onclick="toggleSessionExpand('${escapedKey}', event)">${ago}</div>
+        <div class="table-cell" onclick="toggleSessionExpand(${escapedKey}, event)"><span class="badge ${typeClass}">${typeClass}</span></div>
+        <div class="table-cell mono" style="color:${modelColor};" onclick="toggleSessionExpand(${escapedKey}, event)">${escapeHtml(shortModel)}</div>
+        <div class="table-cell mono" onclick="toggleSessionExpand(${escapedKey}, event)">${escapeHtml((s.totalTokens||0).toLocaleString())}</div>
+        <div class="table-cell mono" onclick="toggleSessionExpand(${escapedKey}, event)">${costStr}</div>
+        <div class="table-cell" style="font-size:11px;color:var(--text-muted);font-family:'JetBrains Mono',monospace;" onclick="toggleSessionExpand(${escapedKey}, event)">${escapeHtml(lastMsg)}</div>
+        <div class="table-cell" onclick="toggleSessionExpand(${escapedKey}, event)">${ago}</div>
       </div>`;
   }).join('');
 
@@ -3874,8 +3898,8 @@ async function fetchGeminiUsage() {
       container.innerHTML = '';
       for (const [name, info] of Object.entries(d.models)) {
         const used = parseFloat(info.used_percent) || 0;
-        const resets = String(info.resets_in || '').replace(/[<>&"']/g, '');
-        const safeName = String(name).replace(/[<>&"']/g, '');
+        const resets = escapeHtml(info.resets_in || '');
+        const safeName = escapeHtml(name);
         const color = getProgressColor(used);
         container.innerHTML += '<div>' +
           '<div style="display:flex;justify-content:space-between;align-items:baseline;margin-bottom:6px;">' +
@@ -4089,6 +4113,8 @@ function updateLimits() {
   const burnRate = usage.burnRate || { tokensPerMinute: 0, costPerMinute: 0 };
   document.getElementById('burnRateDisplay').textContent = burnRate.tokensPerMinute > 0 ? burnRate.tokensPerMinute.toFixed(0) : '--';
   document.getElementById('costPerMinValue').textContent = '$' + burnRate.costPerMinute.toFixed(4);
+  const usageWarning = document.getElementById('costPerMinSub');
+  usageWarning.textContent = pricingWarning(usage.unpricedMessages) || 'Last 30 minutes';
 
   const predictions = usage.predictions || { timeToLimit: null, safe: true };
   const ttlEl = document.getElementById('timeToLimitValue');
@@ -4122,16 +4148,17 @@ function updateLimits() {
       var cacheWriteCost = calc.cacheWriteCost || 0;
       var totalModelCost = calc.totalCost || (inputCost + outputCost + cacheReadCost + cacheWriteCost);
       var cacheCost = cacheReadCost + cacheWriteCost;
+      var breakdownKnown = calc.costKnown !== false && calc.breakdownKnown !== false;
       return '<div style="margin-bottom:20px;padding-bottom:16px;border-bottom:1px solid var(--border);">' +
           '<div style="display:flex;justify-content:space-between;margin-bottom:6px;">' +
-            '<span class="mono" style="font-size:14px;font-weight:600;">' + shortModel + '</span>' +
-            '<span class="mono" style="font-size:14px;font-weight:600;color:var(--accent);">$' + totalModelCost.toFixed(4) + '</span>' +
+            '<span class="mono" style="font-size:14px;font-weight:600;">' + escapeHtml(shortModel) + '</span>' +
+            '<span class="mono" style="font-size:14px;font-weight:600;color:var(--accent);">' + sessionCostLabel({ cost: totalModelCost, costKnown: calc.costKnown }, 4) + '</span>' +
           '</div>' +
           '<div style="display:flex;gap:16px;font-size:11px;color:var(--text-muted);font-family:\'JetBrains Mono\',monospace;">' +
-            '<span>' + data.calls + ' calls</span>' +
-            '<span>' + (data.input/1000).toFixed(0) + 'k in ($' + inputCost.toFixed(4) + ')</span>' +
-            '<span>' + (data.output/1000).toFixed(0) + 'k out ($' + outputCost.toFixed(4) + ')</span>' +
-            (cacheCost > 0 ? '<span>cache ($' + cacheCost.toFixed(4) + ')</span>' : '') +
+            '<span>' + escapeHtml(data.calls) + ' calls</span>' +
+            '<span>' + (data.input/1000).toFixed(0) + 'k in' + (breakdownKnown ? ' ($' + inputCost.toFixed(4) + ')' : '') + '</span>' +
+            '<span>' + (data.output/1000).toFixed(0) + 'k out' + (breakdownKnown ? ' ($' + outputCost.toFixed(4) + ')' : '') + '</span>' +
+            (breakdownKnown && cacheCost > 0 ? '<span>cache ($' + cacheCost.toFixed(4) + ')</span>' : '') +
           '</div>' +
         '</div>';
     }).join('');
@@ -4144,12 +4171,12 @@ function updateLimits() {
     return `
       <div style="display:flex;justify-content:space-between;padding:8px 0;border-bottom:1px solid var(--border);font-size:12px;">
         <div>
-          <div class="mono" style="font-weight:600;">${shortModel}</div>
-          <div style="color:var(--text-muted);font-size:11px;">${call.ago}</div>
+          <div class="mono" style="font-weight:600;">${escapeHtml(shortModel)}</div>
+          <div style="color:var(--text-muted);font-size:11px;">${escapeHtml(call.ago)}</div>
         </div>
         <div style="text-align:right;">
-          <div class="mono">${call.output.toLocaleString()} out</div>
-          <div style="color:var(--text-muted);font-size:11px;">$${call.cost.toFixed(4)}</div>
+          <div class="mono">${escapeHtml(call.output.toLocaleString())} out</div>
+          <div style="color:var(--text-muted);font-size:11px;">${sessionCostLabel(call, 4)}</div>
         </div>
       </div>`;
   }).join('');
@@ -4170,7 +4197,7 @@ function updateLimits() {
       }).filter(d => d.cost > 0).sort((a, b) => b.cost - a.cost);
       
       if (modelData.length === 0) {
-        donutEl.innerHTML = '<div style="color:var(--text-muted);">No data</div>';
+        donutEl.innerHTML = '<div style="color:var(--text-muted);">' + (costs.unpricedMessages ? 'Unpriced usage' : 'No data') + '</div>';
       } else {
         const total = modelData.reduce((s, d) => s + d.cost, 0);
         const size = 200, r = 70, strokeW = 40;
@@ -4186,14 +4213,14 @@ function updateLimits() {
           const endY = size / 2 + r * Math.sin((currentAngle + angle - 90) * Math.PI / 180);
           currentAngle += angle;
           
-          return `<path d="M ${size/2},${size/2} L ${startX},${startY} A ${r},${r} 0 ${largeArc},1 ${endX},${endY} Z" fill="${d.color}" opacity="0.8" style="cursor:pointer;"><title>${d.model}: ${(pct*100).toFixed(1)}%</title></path>`;
+          return `<path d="M ${size/2},${size/2} L ${startX},${startY} A ${r},${r} 0 ${largeArc},1 ${endX},${endY} Z" fill="${d.color}" opacity="0.8" style="cursor:pointer;"><title>${escapeHtml(d.model)}: ${(pct*100).toFixed(1)}%</title></path>`;
         }).join('');
         
         const legend = modelData.map((d, i) => {
           const pct = ((d.cost / total) * 100).toFixed(1);
           return `<div style="display:flex;align-items:center;gap:8px;margin-bottom:8px;">
             <div style="width:16px;height:16px;background:${d.color};border-radius:3px;opacity:0.8;"></div>
-            <span style="font-size:13px;flex:1;">${d.model}</span>
+            <span style="font-size:13px;flex:1;">${escapeHtml(d.model)}</span>
             <span style="font-size:13px;font-weight:600;font-family:'JetBrains Mono',monospace;">${pct}%</span>
           </div>`;
         }).join('');
@@ -4214,6 +4241,11 @@ function updateLimits() {
 }
 
 function updateCosts() {
+  const warning = document.getElementById('costPricingWarning');
+  if (warning) {
+    warning.textContent = pricingWarning(costs.unpricedMessages);
+    warning.style.display = warning.textContent ? 'block' : 'none';
+  }
   const todayEl = document.getElementById('costToday');
   todayEl.dataset.format = 'currency';
   animateValue(todayEl, costs.today || 0);
@@ -4225,6 +4257,7 @@ function updateCosts() {
   const totalEl = document.getElementById('costTotal');
   totalEl.dataset.format = 'currency';
   animateValue(totalEl, costs.total || 0);
+  totalEl.title = pricingWarning(costs.unpricedMessages);
   
   const perDay = costs.perDay || {};
   const dayCount = Object.keys(perDay).length || 1;
@@ -4290,8 +4323,8 @@ function updateCosts() {
       const shortModel = model.split('/').pop();
       return `
         <div style="display:flex; justify-content:space-between; padding:10px 0; border-bottom:1px solid var(--border);">
-          <span class="mono">${shortModel}</span>
-          <span class="mono" style="font-weight:700;">$${cost.toFixed(2)}</span>
+          <span class="mono">${escapeHtml(shortModel)}</span>
+          <span class="mono" style="font-weight:700;">${sessionCostLabel({ cost, costKnown: !(costs.unpricedPerModel && costs.unpricedPerModel[model]) })}</span>
         </div>
       `;
     }).join('');
@@ -4305,8 +4338,8 @@ function updateCosts() {
     .slice(0, 10)
     .map(([sid, v]) => `
         <div style="display:flex; justify-content:space-between; padding:10px 0; border-bottom:1px solid var(--border);">
-          <span>${v.label}</span>
-          <span class="mono" style="font-weight:700;">$${v.cost.toFixed(2)}</span>
+          <span>${escapeHtml(v.label)}</span>
+          <span class="mono" style="font-weight:700;">${sessionCostLabel(v)}</span>
         </div>
       `).join('');
   
@@ -4560,7 +4593,7 @@ async function fetchNewData() {
       const textColor = s.active === null ? 'var(--text-muted)' : (s.active ? 'var(--green)' : 'var(--red)');
       return `<div style="display:flex;align-items:center;gap:10px;padding:12px 0;border-bottom:${border};">
         <span style="width:10px;height:10px;border-radius:50%;background:${dotColor};flex-shrink:0;"></span>
-        <span style="font-weight:600;font-size:14px;">${s.name}</span>
+        <span style="font-weight:600;font-size:14px;">${escapeHtml(s.name)}</span>
         <span style="margin-left:auto;font-size:12px;color:${textColor};">${status}</span>
       </div>`;
     }).join('') || '<div class="empty-state-text">No services</div>';
@@ -4573,11 +4606,11 @@ async function fetchNewData() {
       const toggleBg = c.enabled ? 'rgba(16,185,129,0.2)' : 'var(--bg-tertiary)';
       return `<div style="padding:10px 0;border-bottom:1px solid var(--border);">
         <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px;">
-          <span style="font-weight:600;font-size:13px;flex:1;">${statusIcon} ${c.name}</span>
-          <button onclick="window.toggleCronJob('${c.id}')" style="padding:2px 8px;background:${toggleBg};color:${toggleColor};border:1px solid var(--border);border-radius:4px;font-size:10px;font-weight:600;cursor:pointer;margin-right:4px;">${c.enabled ? 'ON' : 'OFF'}</button>
-          <button onclick="window.runCronJob('${c.id}')" style="padding:2px 8px;background:var(--bg-tertiary);color:var(--text-primary);border:1px solid var(--border);border-radius:4px;font-size:10px;cursor:pointer;">▶</button>
+          <span style="font-weight:600;font-size:13px;flex:1;">${statusIcon} ${escapeHtml(c.name)}</span>
+          <button onclick="window.toggleCronJob(${htmlJsArg(c.id)})" style="padding:2px 8px;background:${toggleBg};color:${toggleColor};border:1px solid var(--border);border-radius:4px;font-size:10px;font-weight:600;cursor:pointer;margin-right:4px;">${c.enabled ? 'ON' : 'OFF'}</button>
+          <button onclick="window.runCronJob(${htmlJsArg(c.id)})" style="padding:2px 8px;background:var(--bg-tertiary);color:var(--text-primary);border:1px solid var(--border);border-radius:4px;font-size:10px;cursor:pointer;">▶</button>
         </div>
-        <span class="mono" style="font-size:11px;color:var(--text-muted);">${c.schedule}</span>
+        <span class="mono" style="font-size:11px;color:var(--text-muted);">${escapeHtml(c.schedule)}</span>
         <div style="font-size:11px;color:var(--text-muted);margin-top:4px;">Next: ${c.enabled ? nextAgo : 'disabled'} · Last: ${c.lastDuration ? (c.lastDuration / 1000).toFixed(0) + 's' : '--'}</div>
       </div>`;
     }).join('') || '<div class="empty-state-text">No cron jobs</div>';
@@ -4585,14 +4618,14 @@ async function fetchNewData() {
 // Cron management
 window.toggleCronJob = async function(id) {
   try {
-    await authFetch(`/api/cron/${id}/toggle`, { method: 'POST' });
+    await authFetch(API_BASE + `/api/cron/${encodeURIComponent(id)}/toggle`, { method: 'POST' });
     await fetchNewData();
   } catch {}
 };
 
 window.runCronJob = async function(id) {
   try {
-    await authFetch(`/api/cron/${id}/run`, { method: 'POST' });
+    await authFetch(API_BASE + `/api/cron/${encodeURIComponent(id)}/run`, { method: 'POST' });
     sendNotification('Cron Job Started', `Running cron job ${id.substring(0, 8)}...`);
   } catch {}
 };
@@ -4601,9 +4634,9 @@ window.runCronJob = async function(id) {
       const age = now - c.timestamp;
       const ago = age < 3600000 ? Math.round(age/60000)+'m ago' : age < 86400000 ? Math.round(age/3600000)+'h ago' : Math.round(age/86400000)+'d ago';
       return `<div style="display:flex;gap:10px;padding:8px 0;border-bottom:1px solid var(--border);font-size:12px;">
-        <span class="mono" style="color:var(--accent);flex-shrink:0;">${c.hash}</span>
-        <span style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${c.message}</span>
-        <span style="flex-shrink:0;color:var(--text-muted);">${c.repo}</span>
+        <span class="mono" style="color:var(--accent);flex-shrink:0;">${escapeHtml(c.hash)}</span>
+        <span style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${escapeHtml(c.message)}</span>
+        <span style="flex-shrink:0;color:var(--text-muted);">${escapeHtml(c.repo)}</span>
         <span style="flex-shrink:0;color:var(--text-muted);">${ago}</span>
       </div>`;
     }).join('') || '<div class="empty-state-text">No recent commits</div>';
@@ -4613,7 +4646,7 @@ window.runCronJob = async function(id) {
       const age = now - f.modified;
       const ago = age < 60000 ? 'just now' : age < 3600000 ? Math.round(age/60000)+'m ago' : age < 86400000 ? Math.round(age/3600000)+'h ago' : Math.round(age/86400000)+'d ago';
       return `<div class="mem-file-item" style="display:flex;justify-content:space-between;padding:12px 0;border-bottom:1px solid var(--border);${idx >= memLimit ? 'display:none;' : ''}">
-        <span class="mono" style="font-size:13px;">📄 ${f.name}</span>
+        <span class="mono" style="font-size:13px;">📄 ${escapeHtml(f.name)}</span>
         <span style="font-size:12px;color:var(--text-muted);">${ago}</span>
       </div>`;
     }).join('') || '<div class="empty-state-text">No files</div>';
@@ -4632,7 +4665,7 @@ window.runCronJob = async function(id) {
         const pct = (total / maxTok) * 100;
         return `<div style="margin-bottom:12px;">
           <div style="display:flex;justify-content:space-between;font-size:12px;margin-bottom:4px;">
-            <span class="mono">${model}</span>
+            <span class="mono">${escapeHtml(model)}</span>
             <span class="mono" style="color:var(--text-muted);">${(d.input/1000).toFixed(0)}k in / ${(d.output/1000).toFixed(0)}k out</span>
           </div>
           <div style="height:6px;background:var(--bg-tertiary);border-radius:3px;overflow:hidden;">
@@ -4651,8 +4684,8 @@ window.runCronJob = async function(id) {
       const shortModel = s.model.split('/').pop();
       const color = modelColors[shortModel] || 'var(--text-muted)';
       return `<div style="display:flex;justify-content:space-between;align-items:center;padding:8px 0;border-bottom:1px solid var(--border);">
-        <span style="font-weight:500;font-size:13px;">${s.label}</span>
-        <span class="mono" style="font-size:11px;color:${color};background:${color}18;padding:2px 8px;border-radius:4px;">${shortModel}</span>
+        <span style="font-weight:500;font-size:13px;">${escapeHtml(s.label)}</span>
+        <span class="mono" style="font-size:11px;color:${color};background:${color}18;padding:2px 8px;border-radius:4px;">${escapeHtml(shortModel)}</span>
       </div>`;
     }).join('') || '<div class="empty-state-text">No sessions</div>';
 
@@ -4680,10 +4713,10 @@ function renderMemoryFilesList() {
     const ago = age < 60000 ? 'just now' : age < 3600000 ? Math.round(age/60000)+'m ago' : age < 86400000 ? Math.round(age/3600000)+'h ago' : Math.round(age/86400000)+'d ago';
     const sizeKb = (f.size / 1024).toFixed(1);
     const icon = f.name.includes('MEMORY') ? '🧠' : f.name.includes('HEARTBEAT') ? '💓' : '📄';
-    return `<div style="padding:12px;border-bottom:1px solid var(--border);cursor:pointer;transition:all 0.2s;" onclick="window.loadMemoryFile('${f.name}')" onmouseover="this.style.background='var(--bg-tertiary)'" onmouseout="this.style.background='transparent'">
+    return `<div style="padding:12px;border-bottom:1px solid var(--border);cursor:pointer;transition:all 0.2s;" onclick="window.loadMemoryFile(${htmlJsArg(f.name)})" onmouseover="this.style.background='var(--bg-tertiary)'" onmouseout="this.style.background='transparent'">
       <div style="display:flex;align-items:center;gap:8px;margin-bottom:4px;">
         <span style="font-size:18px;">${icon}</span>
-        <span style="font-weight:600;font-size:13px;flex:1;">${f.name}</span>
+        <span style="font-weight:600;font-size:13px;flex:1;">${escapeHtml(f.name)}</span>
       </div>
       <div style="font-size:11px;color:var(--text-muted);">${sizeKb} KB · ${ago}</div>
     </div>`;
@@ -4698,8 +4731,7 @@ window.loadMemoryFile = async function(name) {
     contentEl.innerHTML = '<div style="color:var(--text-muted);">Loading...</div>';
     const res = await authFetch(API_BASE + '/api/memory-file?path=' + encodeURIComponent(name));
     const content = await res.text();
-    let html = content
-      .replace(/</g, '&lt;').replace(/>/g, '&gt;')
+    let html = escapeHtml(content)
       .replace(/^### (.+)$/gm, '<div style="font-size:16px;font-weight:700;color:var(--accent);margin:16px 0 8px;">$1</div>')
       .replace(/^## (.+)$/gm, '<div style="font-size:18px;font-weight:700;color:var(--accent);margin:20px 0 12px;">$1</div>')
       .replace(/^# (.+)$/gm, '<div style="font-size:20px;font-weight:700;color:var(--accent);margin:24px 0 16px;">$1</div>')
@@ -4735,10 +4767,10 @@ function renderKeyFilesList() {
     const sizeKb = (f.size / 1024).toFixed(1);
     const icon = f.name.startsWith('skills/') ? '🎯' : f.name.endsWith('.service') ? '⚙️' : f.name.endsWith('.json') ? '🔧' : '📄';
     const isSelected = f.name === currentKeyFile;
-    return `<div style="padding:12px;border-bottom:1px solid var(--border);cursor:pointer;transition:all 0.2s;${isSelected ? 'background:var(--bg-tertiary);' : ''}" onclick="window.loadKeyFile('${f.name.replace(/'/g, "\\'")}')" onmouseover="this.style.background='var(--bg-tertiary)'" onmouseout="this.style.background='${isSelected ? 'var(--bg-tertiary)' : 'transparent'}'">
+    return `<div style="padding:12px;border-bottom:1px solid var(--border);cursor:pointer;transition:all 0.2s;${isSelected ? 'background:var(--bg-tertiary);' : ''}" onclick="window.loadKeyFile(${htmlJsArg(f.name)})" onmouseover="this.style.background='var(--bg-tertiary)'" onmouseout="this.style.background='${isSelected ? 'var(--bg-tertiary)' : 'transparent'}'">
       <div style="display:flex;align-items:center;gap:8px;margin-bottom:4px;">
         <span style="font-size:18px;">${icon}</span>
-        <span style="font-weight:600;font-size:13px;flex:1;">${f.name}</span>
+        <span style="font-weight:600;font-size:13px;flex:1;">${escapeHtml(f.name)}</span>
       </div>
       <div style="font-size:11px;color:var(--text-muted);">${sizeKb} KB · ${ago}</div>
     </div>`;
@@ -4772,8 +4804,7 @@ window.loadKeyFile = async function(name) {
     _currentKeyFileRaw = content;
 
     if (name.endsWith('.md')) {
-      let html = content
-        .replace(/</g, '&lt;').replace(/>/g, '&gt;')
+      let html = escapeHtml(content)
         .replace(/^### (.+)$/gm, '<div style="font-size:16px;font-weight:700;color:var(--accent);margin:16px 0 8px;">$1</div>')
         .replace(/^## (.+)$/gm, '<div style="font-size:18px;font-weight:700;color:var(--accent);margin:20px 0 12px;">$1</div>')
         .replace(/^# (.+)$/gm, '<div style="font-size:20px;font-weight:700;color:var(--accent);margin:24px 0 16px;">$1</div>')
@@ -4781,7 +4812,7 @@ window.loadKeyFile = async function(name) {
         .replace(/`([^`]+)`/g, '<code style="background:var(--bg-tertiary);padding:2px 6px;border-radius:4px;font-size:11px;">$1</code>');
       contentEl.innerHTML = html;
     } else {
-      contentEl.innerHTML = '<pre style="white-space:pre-wrap;word-wrap:break-word;">' + content.replace(/</g, '&lt;').replace(/>/g, '&gt;') + '</pre>';
+      contentEl.innerHTML = '<pre style="white-space:pre-wrap;word-wrap:break-word;">' + escapeHtml(content) + '</pre>';
     }
   } catch (e) {
     contentEl.innerHTML = '<div style="color:var(--red);">Failed to load file</div>';
@@ -4942,6 +4973,20 @@ function highlightText(text, term) {
   return escapeHtml(text.substring(0, idx)) + '<span class="search-highlight">' + escapeHtml(text.substring(idx, idx + term.length)) + '</span>' + escapeHtml(text.substring(idx + term.length));
 }
 
+function htmlJsArg(value) {
+  // Inline handlers parse HTML attributes first, then JavaScript string literals.
+  return escapeHtml(JSON.stringify(String(value ?? '')));
+}
+
+function sessionCostLabel(session, precision = 2) {
+  return session.costKnown === false ? 'Unpriced' : '$' + (Number(session.cost) || 0).toFixed(precision);
+}
+
+function pricingWarning(count) {
+  const unpriced = Math.max(0, Number(count) || 0);
+  return unpriced ? unpriced + ' unpriced message' + (unpriced === 1 ? '' : 's') + '. Totals include known costs only.' : '';
+}
+
 function escapeHtml(value) {
   return String(value ?? '').replace(/[&<>"']/g, character => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[character]));
 }
@@ -4985,11 +5030,11 @@ function showComparison() {
   modal.querySelector('#modalStats').innerHTML = `
     <div style="grid-column:1/-1;display:grid;grid-template-columns:1fr 1fr;gap:24px;">
       <div>
-        <h3 style="font-size:16px;font-weight:700;margin-bottom:16px;color:var(--accent);">${s1.label}</h3>
+        <h3 style="font-size:16px;font-weight:700;margin-bottom:16px;color:var(--accent);">${escapeHtml(s1.label)}</h3>
         <div style="display:flex;flex-direction:column;gap:12px;">
-          <div><span style="color:var(--text-muted);font-size:12px;">Model:</span> <span class="mono">${s1.model.split('/').pop()}</span></div>
-          <div><span style="color:var(--text-muted);font-size:12px;">Tokens:</span> <span class="mono">${(s1.totalTokens||0).toLocaleString()}</span></div>
-          <div><span style="color:var(--text-muted);font-size:12px;">Cost:</span> <span class="mono">$${(s1.cost||0).toFixed(2)}</span></div>
+          <div><span style="color:var(--text-muted);font-size:12px;">Model:</span> <span class="mono">${escapeHtml(s1.model.split('/').pop())}</span></div>
+          <div><span style="color:var(--text-muted);font-size:12px;">Tokens:</span> <span class="mono">${escapeHtml((s1.totalTokens||0).toLocaleString())}</span></div>
+          <div><span style="color:var(--text-muted);font-size:12px;">Cost:</span> <span class="mono">${sessionCostLabel(s1)}</span></div>
           <div style="margin-top:12px;">
             <div style="font-size:11px;color:var(--text-muted);margin-bottom:4px;">Tokens</div>
             <div style="height:24px;background:var(--bg-primary);border-radius:6px;overflow:hidden;">
@@ -5003,11 +5048,11 @@ function showComparison() {
         </div>
       </div>
       <div>
-        <h3 style="font-size:16px;font-weight:700;margin-bottom:16px;color:var(--purple);">${s2.label}</h3>
+        <h3 style="font-size:16px;font-weight:700;margin-bottom:16px;color:var(--purple);">${escapeHtml(s2.label)}</h3>
         <div style="display:flex;flex-direction:column;gap:12px;">
-          <div><span style="color:var(--text-muted);font-size:12px;">Model:</span> <span class="mono">${s2.model.split('/').pop()}</span></div>
-          <div><span style="color:var(--text-muted);font-size:12px;">Tokens:</span> <span class="mono">${(s2.totalTokens||0).toLocaleString()}</span></div>
-          <div><span style="color:var(--text-muted);font-size:12px;">Cost:</span> <span class="mono">$${(s2.cost||0).toFixed(2)}</span></div>
+          <div><span style="color:var(--text-muted);font-size:12px;">Model:</span> <span class="mono">${escapeHtml(s2.model.split('/').pop())}</span></div>
+          <div><span style="color:var(--text-muted);font-size:12px;">Tokens:</span> <span class="mono">${escapeHtml((s2.totalTokens||0).toLocaleString())}</span></div>
+          <div><span style="color:var(--text-muted);font-size:12px;">Cost:</span> <span class="mono">${sessionCostLabel(s2)}</span></div>
           <div style="margin-top:12px;">
             <div style="font-size:11px;color:var(--text-muted);margin-bottom:4px;">Tokens</div>
             <div style="height:24px;background:var(--bg-primary);border-radius:6px;overflow:hidden;">
@@ -5055,11 +5100,11 @@ function openSessionDetail(key) {
   const isActive = age < 300000 && !s.aborted;
   document.getElementById('modalStats').innerHTML = `
     <div><div style="font-size:11px;color:var(--text-muted);text-transform:uppercase;margin-bottom:4px;">Status</div><div style="font-weight:600;color:${isActive ? 'var(--green)' : 'var(--text-primary)'}">${isActive ? '🟢 Active' : s.aborted ? '🔴 Aborted' : '⚪ Idle'}</div></div>
-    <div><div style="font-size:11px;color:var(--text-muted);text-transform:uppercase;margin-bottom:4px;">Model</div><div class="mono" style="font-size:13px;">${s.model.split('/').pop()}</div></div>
-    <div><div style="font-size:11px;color:var(--text-muted);text-transform:uppercase;margin-bottom:4px;">Tokens</div><div class="mono" style="font-size:13px;">${(s.totalTokens||0).toLocaleString()}</div></div>
-    <div><div style="font-size:11px;color:var(--text-muted);text-transform:uppercase;margin-bottom:4px;">Cost</div><div class="mono" style="font-size:13px;">$${(s.cost||0).toFixed(2)}</div></div>
+    <div><div style="font-size:11px;color:var(--text-muted);text-transform:uppercase;margin-bottom:4px;">Model</div><div class="mono" style="font-size:13px;">${escapeHtml(s.model.split('/').pop())}</div></div>
+    <div><div style="font-size:11px;color:var(--text-muted);text-transform:uppercase;margin-bottom:4px;">Tokens</div><div class="mono" style="font-size:13px;">${escapeHtml((s.totalTokens||0).toLocaleString())}</div></div>
+    <div><div style="font-size:11px;color:var(--text-muted);text-transform:uppercase;margin-bottom:4px;">Cost</div><div class="mono" style="font-size:13px;">${sessionCostLabel(s)}</div></div>
     <div><div style="font-size:11px;color:var(--text-muted);text-transform:uppercase;margin-bottom:4px;">Last Active</div><div style="font-size:13px;">${ago}</div></div>
-    <div><div style="font-size:11px;color:var(--text-muted);text-transform:uppercase;margin-bottom:4px;">Channel</div><div style="font-size:13px;">${s.channel || '--'}</div></div>`;
+    <div><div style="font-size:11px;color:var(--text-muted);text-transform:uppercase;margin-bottom:4px;">Channel</div><div style="font-size:13px;">${escapeHtml(s.channel || '--')}</div></div>`;
   document.getElementById('modalMessages').innerHTML = '<div style="color:var(--text-muted);font-size:13px;">Loading...</div>';
   document.getElementById('sessionModal').style.display = 'flex';
   authFetch(API_BASE + '/api/session-messages?id=' + encodeURIComponent(s.sessionId || s.key))
@@ -5070,10 +5115,10 @@ function openSessionDetail(key) {
         const time = m.timestamp ? new Date(m.timestamp).toLocaleTimeString('en', {hour:'2-digit',minute:'2-digit'}) : '';
         return `<div style="padding:8px 0;border-bottom:1px solid var(--border);font-size:12px;">
           <div style="display:flex;justify-content:space-between;margin-bottom:4px;">
-            <span style="font-weight:600;color:${roleColor};text-transform:uppercase;font-size:10px;">${m.role}</span>
+            <span style="font-weight:600;color:${roleColor};text-transform:uppercase;font-size:10px;">${escapeHtml(m.role)}</span>
             <span style="color:var(--text-muted);font-size:10px;">${time}</span>
           </div>
-          <div style="color:var(--text-primary);line-height:1.4;word-break:break-word;font-family:'JetBrains Mono',monospace;font-size:11px;">${m.content.replace(/</g,'&lt;')}</div>
+          <div style="color:var(--text-primary);line-height:1.4;word-break:break-word;font-family:'JetBrains Mono',monospace;font-size:11px;">${escapeHtml(m.content)}</div>
         </div>`;
       }).join('') || '<div style="color:var(--text-muted);font-size:13px;">No messages found</div>';
     }).catch(() => {
@@ -5145,7 +5190,7 @@ async function quickAction(action, evt) {
   if (triggerBtn) { triggerBtn.textContent = loadingLabels[action] || '⏳ Working...'; triggerBtn.disabled = true; triggerBtn.style.opacity = '0.6'; triggerBtn.style.pointerEvents = 'none'; }
 
   try {
-    const res = await authFetch(`/api/action/${action}`, { method: 'POST' });
+    const res = await authFetch(API_BASE + `/api/action/${encodeURIComponent(action)}`, { method: 'POST' });
     const data = await res.json();
     
     if (data.success) {
@@ -5226,7 +5271,8 @@ async function fetchLifetimeStats() {
     
     document.getElementById('ltTokens').textContent = data.totalTokens >= 1000000 ? (data.totalTokens / 1000000).toFixed(1) + 'M' : data.totalTokens >= 1000 ? (data.totalTokens / 1000).toFixed(0) + 'k' : data.totalTokens;
     document.getElementById('ltMessages').textContent = data.totalMessages.toLocaleString();
-    document.getElementById('ltCost').textContent = '$' + data.totalCost.toFixed(2);
+    document.getElementById('ltCost').textContent = '$' + data.totalCost.toFixed(2) + (data.unpricedMessages ? ' + Unpriced' : '');
+    document.getElementById('ltCost').title = pricingWarning(data.unpricedMessages);
     document.getElementById('ltSessions').textContent = data.totalSessions;
     document.getElementById('ltDaysActive').textContent = data.daysActive;
     
@@ -5300,7 +5346,7 @@ function calculateStreak() {
       calendarEl.innerHTML = last30Days.map(d => {
         const color = d.active ? 'var(--green)' : 'var(--bg-tertiary)';
         const opacity = d.active ? '1' : '0.3';
-        return `<div style="width:100%;aspect-ratio:1;background:${color};opacity:${opacity};border-radius:3px;" title="${d.date}"></div>`;
+        return `<div style="width:100%;aspect-ratio:1;background:${color};opacity:${opacity};border-radius:3px;" title="${escapeHtml(d.date)}"></div>`;
       }).join('');
     }
   } catch (e) {
@@ -5320,10 +5366,7 @@ async function fetchLogs() {
   viewer.innerHTML = '<div style="color:var(--text-muted);">Loading logs...</div>';
 
   try {
-    const token = getStoredToken();
-    const res = await fetch(`/api/logs?service=${service}&lines=${lines}`, {
-      headers: { 'Authorization': `Bearer ${token}` }
-    });
+    const res = await authFetch(API_BASE + `/api/logs?service=${encodeURIComponent(service)}&lines=${encodeURIComponent(lines)}`);
 
     if (!res.ok) {
       throw new Error(`HTTP ${res.status}: ${res.statusText}`);
@@ -5411,7 +5454,7 @@ toggleSessionExpand = function(key, e) {
     const s = sessions.find(x => x.key === key);
     if (!s || !s.createdAt) return;
     
-    const detail = document.getElementById('expanded-' + CSS.escape(key));
+    const detail = document.getElementById('expanded-' + key);
     if (!detail) return;
     
     const now = s.updatedAt || Date.now();
@@ -5470,6 +5513,7 @@ async function fetchSysSecurity() {
   try {
     const res = await authFetch(API_BASE + '/api/sys-security');
     const data = await res.json();
+    if (res.ok === false) throw new Error(data.error || 'Unable to load system security');
     document.getElementById('secUfw').textContent = data.ufw || 'N/A';
     document.getElementById('secPorts').textContent = data.ports || 'N/A';
     document.getElementById('secF2b').textContent = data.fail2ban || 'N/A';
@@ -5478,40 +5522,82 @@ async function fetchSysSecurity() {
   } catch(e) { showToast('Security fetch error: ' + e.message, 'warning'); }
 }
 
-let reauthTargetPage = 'sys-security';
-function showReauthModal(targetPage) {
-  reauthTargetPage = targetPage || 'sys-security';
+function requestReauthentication() {
+  if (pendingReauth) return pendingReauth;
+  pendingReauth = new Promise((resolve, reject) => {
+    resolveReauth = resolve;
+    rejectReauth = reject;
+  });
+  showReauthModal();
+  return pendingReauth;
+}
+
+function resetReauthentication(error = new Error('Session expired')) {
+  const reject = rejectReauth;
+  pendingReauth = null;
+  resolveReauth = null;
+  rejectReauth = null;
+  reauthSubmitting = false;
+  const overlay = document.getElementById('reauthOverlay');
+  if (overlay) overlay.style.display = 'none';
+  for (const id of ['reauthPass', 'reauthTotp']) {
+    const input = document.getElementById(id);
+    if (input) input.value = '';
+  }
+  if (reject) reject(error);
+}
+
+function showReauthModal() {
+  reauthReturnFocus = document.activeElement;
   let overlay = document.getElementById('reauthOverlay');
   if (!overlay) {
     overlay = document.createElement('div');
     overlay.id = 'reauthOverlay';
+    overlay.setAttribute('role', 'dialog');
+    overlay.setAttribute('aria-modal', 'true');
+    overlay.setAttribute('aria-labelledby', 'reauthTitle');
     overlay.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.7);z-index:600;display:flex;align-items:center;justify-content:center;';
     overlay.innerHTML = '<div style="background:var(--bg-card);border:1px solid var(--border);border-radius:16px;padding:32px;max-width:380px;width:90%;">' +
-      '<h3 style="margin-bottom:8px;">🔒 Re-authentication Required</h3>' +
-      '<p style="font-size:13px;color:var(--text-secondary);margin-bottom:20px;">Enter your credentials to access System Security.</p>' +
-      '<input type="password" id="reauthPass" placeholder="Password" style="width:100%;padding:12px;background:var(--bg-secondary);border:1px solid var(--border);border-radius:8px;color:var(--text-primary);font-size:14px;margin-bottom:12px;">' +
-      '<input type="text" id="reauthTotp" placeholder="Authenticator Code (if enabled)" style="width:100%;padding:12px;background:var(--bg-secondary);border:1px solid var(--border);border-radius:8px;color:var(--text-primary);font-size:14px;margin-bottom:12px;font-family:JetBrains Mono,monospace;" maxlength="6" autocomplete="one-time-code">' +
+      '<h3 id="reauthTitle" style="margin-bottom:8px;">🔒 Re-authentication Required</h3>' +
+      '<p style="font-size:13px;color:var(--text-secondary);margin-bottom:20px;">Confirm your credentials to continue. Access lasts five minutes; your pending changes are preserved.</p>' +
+      '<input type="password" id="reauthPass" aria-label="Password" autocomplete="current-password" placeholder="Password" style="width:100%;padding:12px;background:var(--bg-secondary);border:1px solid var(--border);border-radius:8px;color:var(--text-primary);font-size:16px;margin-bottom:12px;">' +
+      '<input type="text" id="reauthTotp" aria-label="Authenticator code" inputmode="numeric" placeholder="Authenticator Code (if enabled)" style="width:100%;padding:12px;background:var(--bg-secondary);border:1px solid var(--border);border-radius:8px;color:var(--text-primary);font-size:16px;margin-bottom:12px;font-family:JetBrains Mono,monospace;" maxlength="6" autocomplete="one-time-code">' +
       '<div id="reauthError" style="display:none;color:var(--red);font-size:12px;margin-bottom:12px;padding:8px;background:rgba(239,68,68,0.1);border-radius:6px;"></div>' +
       '<div style="display:flex;gap:8px;">' +
-      '<button onclick="submitReauth()" style="flex:1;padding:12px;background:linear-gradient(135deg,var(--accent),var(--purple));color:#fff;border:none;border-radius:8px;font-weight:600;cursor:pointer;">Verify</button>' +
+      '<button id="reauthVerify" onclick="submitReauth()" style="flex:1;padding:12px;background:linear-gradient(135deg,var(--accent),var(--purple));color:#fff;border:none;border-radius:8px;font-weight:600;cursor:pointer;">Verify</button>' +
       '<button onclick="cancelReauth()" style="flex:1;padding:12px;background:var(--bg-secondary);color:var(--text-primary);border:1px solid var(--border);border-radius:8px;font-weight:500;cursor:pointer;">Cancel</button>' +
       '</div></div>';
     document.body.appendChild(overlay);
     document.getElementById('reauthPass').addEventListener('keydown', e => { if(e.key === 'Enter') document.getElementById('reauthTotp').focus(); });
     document.getElementById('reauthTotp').addEventListener('keydown', e => { if(e.key === 'Enter') submitReauth(); });
+    overlay.addEventListener('keydown', event => {
+      if (event.key === 'Escape') { event.preventDefault(); cancelReauth(); }
+      if (event.key === 'Tab') {
+        const controls = [...overlay.querySelectorAll('input,button')].filter(control => !control.disabled);
+        const first = controls[0], last = controls[controls.length - 1];
+        if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last.focus(); }
+        else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first.focus(); }
+      }
+    });
   }
   overlay.style.display = 'flex';
   document.getElementById('reauthPass').value = '';
   document.getElementById('reauthTotp').value = '';
   document.getElementById('reauthError').style.display = 'none';
+  document.getElementById('reauthVerify').disabled = false;
   setTimeout(() => document.getElementById('reauthPass').focus(), 100);
 }
 
 async function submitReauth() {
+  if (reauthSubmitting || !pendingReauth) return;
+  const request = pendingReauth;
   const pass = document.getElementById('reauthPass').value;
   const totp = document.getElementById('reauthTotp').value;
   const errEl = document.getElementById('reauthError');
   if (!pass) { errEl.textContent = 'Password required'; errEl.style.display = 'block'; return; }
+  reauthSubmitting = true;
+  const verifyButton = document.getElementById('reauthVerify');
+  verifyButton.disabled = true;
   try {
     const token = getStoredToken();
     const res = await fetch(API_BASE + '/api/reauth', {
@@ -5520,18 +5606,22 @@ async function submitReauth() {
       body: JSON.stringify({ password: pass, totp: totp || undefined })
     });
     const data = await res.json();
+    if (pendingReauth !== request) return;
+    if (res.status === 401 && data.error === 'Unauthorized') { clearStoredToken(); showLogin(); return; }
     if (data.needsTotp && !totp) { errEl.textContent = 'Authenticator code required'; errEl.style.display = 'block'; document.getElementById('reauthTotp').focus(); return; }
     if (data.error) { errEl.textContent = data.error; errEl.style.display = 'block'; return; }
-    sysSecAuthed = true;
+    if (!res.ok || !(data.ok || data.success)) { errEl.textContent = 'Verification failed. Please try again.'; errEl.style.display = 'block'; return; }
+    const resolve = resolveReauth;
+    pendingReauth = null;
+    resolveReauth = null;
+    rejectReauth = null;
     document.getElementById('reauthOverlay').style.display = 'none';
-    document.querySelectorAll('.nav-item').forEach(i => i.classList.remove('active'));
-    document.querySelector('[data-page="' + reauthTargetPage + '"]').classList.add('active');
-    document.querySelectorAll('.page').forEach(p => p.classList.remove('active'));
-    document.getElementById(reauthTargetPage).classList.add('active');
-    if (reauthTargetPage === 'sys-security') fetchSysSecurity();
-    if (reauthTargetPage === 'config-editor') loadConfig();
-
+    document.getElementById('reauthPass').value = '';
+    document.getElementById('reauthTotp').value = '';
+    if (reauthReturnFocus && reauthReturnFocus.isConnected) reauthReturnFocus.focus();
+    if (resolve) resolve();
   } catch(e) { errEl.textContent = 'Error: ' + e.message; errEl.style.display = 'block'; }
+  finally { reauthSubmitting = false; verifyButton.disabled = false; }
 }
 
 async function loadConfig() {
@@ -5574,14 +5664,14 @@ async function saveConfig() {
 }
 
 function cancelReauth() {
-  document.getElementById('reauthOverlay').style.display = 'none';
-  document.querySelector('[data-page="overview"]').click();
+  resetReauthentication(new Error('Re-authentication cancelled'));
+  if (reauthReturnFocus && reauthReturnFocus.isConnected) reauthReturnFocus.focus();
 }
 
 document.querySelectorAll('.nav-item').forEach(item => {
   item.addEventListener('click', () => {
-    if (item.dataset.page === 'sys-security' && sysSecAuthed) fetchSysSecurity();
-    if (item.dataset.page === 'config-editor' && sysSecAuthed) loadConfig();
+    if (item.dataset.page === 'sys-security') fetchSysSecurity();
+    if (item.dataset.page === 'config-editor') loadConfig();
     if (item.dataset.page === 'docker') loadDocker();
   });
 });

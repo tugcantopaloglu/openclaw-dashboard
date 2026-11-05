@@ -3,7 +3,7 @@
 # OpenClaw Agent Dashboard
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://opensource.org/licenses/MIT)
-[![Node.js](https://img.shields.io/badge/Node.js-v18+-green.svg)](https://nodejs.org/)
+[![Node.js](https://img.shields.io/badge/Node.js-v22+-green.svg)](https://nodejs.org/)
 [![OpenClaw](https://img.shields.io/badge/OpenClaw-Compatible-purple.svg)](https://openclaw.dev)
 
 A beautiful, secure, real-time monitoring dashboard for OpenClaw agents. Track sessions, monitor API usage, view costs, manage memory files, and keep tabs on system health - all in one place.
@@ -81,7 +81,7 @@ Visit `http://localhost:7000` in your browser. On first visit, you'll see a **re
 
 ### Prerequisites
 
-- **Node.js** v18 or higher (check with `node --version`)
+- **Node.js** supported LTS v22 or higher (v24 recommended; check with `node --version`)
 - **OpenClaw** installed and running
 - **Systemd** (optional, for service installation on Linux)
 
@@ -118,10 +118,10 @@ Visit `http://localhost:7000` in your browser. On first visit, you'll see a **re
    The server will print:
    ```
     Dashboard running on http://localhost:7000
-    Recovery token: abc123def456...
+    Recovery token saved to: /path/to/your/workspace/data/recovery-token.txt
    ```
 
-   **Save the recovery token** - you'll need it if you forget your password.
+   **Read and save the recovery token from the private file** - you'll need it if you forget your password. Its value is never written to startup or service logs.
 
 4. **Access the dashboard**
    Open `http://localhost:7000` and register your account.
@@ -131,12 +131,11 @@ Visit `http://localhost:7000` in your browser. On first visit, you'll see a **re
 To run the dashboard as a system service with auto-start and crash recovery:
 
 ```bash
-sudo ./install.sh
+./install.sh
 ```
 
 This will:
 - Create `/etc/systemd/system/agent-dashboard.service`
-- Create override config at `/etc/systemd/system/agent-dashboard.service.d/override.conf`
 - Enable and start the service
 - Set your workspace path and generate a recovery token
 
@@ -177,14 +176,25 @@ docker run -d \
   openclaw-dashboard
 ```
 
+The image listens on `0.0.0.0` inside the container so published ports remain
+reachable. Use `-p 127.0.0.1:3001:3001` when a local reverse proxy handles access.
+The example OpenClaw mount is read-only: monitoring works, but the Config Editor
+cannot save changes to that mount. Enable writes only if you intend to manage
+the host configuration through the dashboard. Ensure the workspace is writable
+by the container's `node` user, and preserve the auth directory across rebuilds.
+
 ### Environment Variables
 
 | Variable | Description | Default |
 |----------|-------------|---------|
 | `DASHBOARD_PORT` | Server port | `7000` |
-| `DASHBOARD_TOKEN` | Recovery token for password reset | Auto-generated on startup |
+| `DASHBOARD_HOST` | Address to listen on | `0.0.0.0` |
+| `DASHBOARD_TOKEN` | Explicit recovery token for password reset; takes precedence over the token file | Persisted random token |
+| `DASHBOARD_AUTH_DIR` | Private credentials, recovery token and audit directory | `$WORKSPACE_DIR/data` |
+| `DASHBOARD_TRUSTED_PROXIES` | Comma-separated exact proxy IPs allowed to supply `X-Forwarded-Proto` | Loopback only |
 | `WORKSPACE_DIR` | OpenClaw workspace path | `$OPENCLAW_WORKSPACE` or current directory |
 | `OPENCLAW_DIR` | OpenClaw config directory | `~/.openclaw` |
+| `OPENCLAW_CONFIG` | Config Editor file path | `$OPENCLAW_DIR/openclaw.json` |
 | `OPENCLAW_AGENT` | Agent ID to monitor | `main` |
 | `DASHBOARD_ALLOW_HTTP` | Allow HTTP from non-local IPs | `false` |
 
@@ -297,33 +307,22 @@ If you forget your password:
 
 ### Finding Your Recovery Token
 
-The recovery token (`DASHBOARD_TOKEN`) is printed when the server starts. You can find it in several places:
+Unless `DASHBOARD_TOKEN` is supplied, the server creates
+`$DASHBOARD_AUTH_DIR/recovery-token.txt` once and reuses it after restarts. The
+default is `$WORKSPACE_DIR/data/recovery-token.txt`. On POSIX systems the auth
+directory is owner-only (`0700`) and credential/token files are owner-only
+(`0600`). Startup logs show only the file location.
 
-#### Check Server Startup Logs
+Read the file locally as the service account or an administrator:
 ```bash
-journalctl -u agent-dashboard | grep "Recovery token"
+cat /path/to/your/workspace/data/recovery-token.txt
 ```
 
-Output:
-```
- Recovery token: 3e6b91f352418b486a9aa9d82fbbc1b1
-```
-
-#### Check Systemd Override Config
-```bash
-cat /etc/systemd/system/agent-dashboard.service.d/override.conf
-```
-
-Look for:
-```ini
-Environment=DASHBOARD_TOKEN=3e6b91f352418b486a9aa9d82fbbc1b1
-```
-
-#### Check Environment Variable
-If you set it manually:
-```bash
-echo $DASHBOARD_TOKEN
-```
+If you supply `DASHBOARD_TOKEN`, use that configured value instead. Preserve it
+or the private token file when moving the installation. Tokens printed by older
+versions may remain in historical logs; set a new `DASHBOARD_TOKEN` if you need
+to invalidate such a token. Deleting the generated token file while the server
+is stopped causes a new token to be generated on the next start.
 
 ### Changing Your Password
 
@@ -364,11 +363,12 @@ The dashboard is built with security best practices:
 - **HTTPS enforcement** - HTTP blocked except from localhost and Tailscale (100.64.0.0/10)
 - **Security headers**:
   - **HSTS** - Force HTTPS on future visits
-  - **CSP** - Content Security Policy (no inline scripts, same-origin)
+  - **CSP** - Same-origin scripts; the single-file UI currently requires `unsafe-inline`
   - **X-Frame-Options: DENY** - Prevent clickjacking
   - **X-Content-Type-Options: nosniff** - Prevent MIME sniffing
   - **X-XSS-Protection: 1; mode=block** - Legacy XSS protection
-- **Audit logging** - All auth events and destructive actions logged to `data/audit.log`
+- **Audit logging** - All auth events and destructive actions logged to `$DASHBOARD_AUTH_DIR/audit.log`
+- **Sensitive operations** - Config access and system security output require a fresh, session-bound password/TOTP verification, valid for five minutes
 - **CORS** - Same-origin only, no wildcard (`*`) allowed
 - **Input validation**:
   - Service whitelist for logs and actions
@@ -394,7 +394,14 @@ By default, the dashboard **blocks HTTP access** from non-local IPs. Exemptions:
 - **Localhost** (127.0.0.1, ::1)
 - **Tailscale IPs** (100.64.0.0/10)
 
-For other networks, the dashboard requires HTTPS or the `X-Forwarded-Proto: https` header (from a reverse proxy).
+For other networks, the dashboard requires HTTPS or `X-Forwarded-Proto: https`
+from a trusted reverse proxy. Loopback proxies are trusted by default; list
+other exact proxy IPs in `DASHBOARD_TRUSTED_PROXIES`. Headers from other peers do
+not bypass HTTPS enforcement. Keep the backend port private, and configure the
+proxy to overwrite forwarded headers rather than append untrusted client values.
+
+`DASHBOARD_HOST=127.0.0.1` restricts a native installation to local access.
+Containers must listen on `0.0.0.0` internally for Docker port publishing.
 
 To allow HTTP from all IPs (not recommended):
 ```bash
@@ -495,6 +502,7 @@ The dashboard exposes a REST API for programmatic access. All endpoints require 
 ### Unauthenticated Endpoints
 
 - `GET /api/auth/status` - Check authentication status
+- `GET /api/health` - Process health and uptime
 - `POST /api/auth/login` - Log in with username/password (+ TOTP if MFA enabled)
 - `POST /api/auth/register` - Register a new account (only if no credentials exist)
 - `POST /api/auth/reset-password` - Reset password with recovery token
@@ -533,7 +541,47 @@ All other endpoints require authentication:
 - `GET /api/services` - List systemd services
 - `POST /api/services/action` - Service actions (start/stop/restart, whitelisted only)
 
-For detailed request/response examples, see the previous version of this README or explore the API in the browser's Network tab.
+### Sensitive endpoint authorization
+
+`GET`/`PUT /api/openclaw-config`, `GET /api/sys-security`, and reading
+`openclaw-config.json` through `/api/key-file` require a successful
+`POST /api/reauth` in the same session within the last five minutes. Send JSON
+`{"password":"...","totp":"123456"}` with the bearer session; `totp` is required
+when MFA is enabled. Success returns `{"ok":true}`. A missing or expired grant
+returns HTTP `403` with `{"error":"Re-authentication required","code":"REAUTH_REQUIRED"}`.
+The UI prompts again and retries the request. An absent/expired login session
+still returns `401`. Config writes create a backup before restarting the gateway.
+
+### Cost estimates and overrides
+
+Pricing is defined in `lib/pricing.js`, with verification dates and source links.
+Known model aliases work with custom providers. Add your actual provider rates
+to `$WORKSPACE_DIR/data/model_pricing_usd_per_million.json`; explicit custom
+entries take precedence over the fallback catalog. Existing numeric totals are
+preserved in API responses. `costKnown`, `unpricedMessages`, and
+`unpricedPerModel` identify missing prices so the UI can show **Unpriced** or
+partial-total warnings instead of implying that unknown usage is free.
+
+Example override (USD per million tokens):
+
+```json
+{
+  "rates_usd_per_million": {
+    "custom-provider/claude-opus-4.6": {
+      "input": 5, "output": 25, "cacheRead": 0.5, "cacheWrite": 6.25,
+      "cacheWrite1h": 10
+    }
+  }
+}
+```
+
+Positive provider-reported costs take precedence over estimates. A reported zero
+falls back to token-based estimation, matching existing custom-provider behavior.
+Anthropic cache writes without duration information use the five-minute rate;
+explicit five-minute/one-hour counts are priced separately. Catalog estimates
+exclude taxes, negotiated discounts and features not present in the usage record.
+Legacy Gemini 3 Pro and Grok 4.1 Fast rows retain previous repository rates and
+are marked as unverified in the catalog metadata; use overrides for actual rates.
 
 ## Data Files
 
@@ -543,9 +591,13 @@ The dashboard stores data in your workspace directory:
 |------|---------|
 | `data/credentials.json` | Username + hashed password + MFA secret |
 | `data/audit.log` | Security audit trail (auto-rotates at 10MB) |
+| `data/recovery-token.txt` | Persistent password-recovery token; never logged |
 | `data/health-history.json` | CPU/RAM/Temp/Disk history for sparklines |
 | `data/claude-usage.json` | Last scraped Claude usage data |
 | `data/gemini-usage.json` | Last scraped Gemini usage data |
+
+With `DASHBOARD_AUTH_DIR`, credentials, recovery token and audit log are stored
+there instead; health and provider usage files stay in the workspace data folder.
 
 **Credentials file structure:**
 ```json
@@ -618,17 +670,21 @@ The dashboard has no build step. Edit `server.js` or `index.html` and reload.
 
 ### Validation
 
-Use Node.js 20 or 22 to run the dependency-free checks:
+Use a supported Node.js LTS release (22, 24 or 26) to run the dependency-free checks:
 
 ```bash
 node --check server.js
 node --test
 ```
 
-The tests validate browser script syntax, safe rendering of audit events, search
-results and command output, authentication, and notification pagination. Server
+The tests validate browser script syntax, safe rendering, pricing and aliases,
+authentication, recovery-token persistence, fresh reauthentication, trusted proxy
+handling, and notification pagination. Server
 tests use a temporary workspace and never restart services or change the active
-OpenClaw installation. CI runs these checks on pushes and pull requests.
+OpenClaw installation. CI runs these checks on Node.js 22/24/26 and verifies a
+Docker build with a smoke test through its published port. To repeat the Docker
+check locally, start a fresh container on port 3001 and run
+`node scripts/smoke-docker.cjs` (`DASHBOARD_SMOKE_URL` overrides the base URL).
 
 ### Code Style
 

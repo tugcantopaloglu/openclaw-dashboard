@@ -4,9 +4,10 @@ const path = require('path');
 const os = require('os');
 const { exec } = require('child_process');
 const crypto = require('crypto');
+const { isHTTPS, hasFreshReauth, atomicWriteFileSync, loadRecoveryToken } = require('./lib/security');
 
 const PORT = parseInt(process.env.DASHBOARD_PORT || '7000');
-const HOST = process.env.DASHBOARD_HOST || '127.0.0.1';
+const HOST = process.env.DASHBOARD_HOST || '0.0.0.0';
 const OPENCLAW_DIR = process.env.OPENCLAW_DIR || path.join(os.homedir(), '.openclaw');
 const WORKSPACE_DIR = process.env.WORKSPACE_DIR || process.env.OPENCLAW_WORKSPACE || process.cwd();
 const AGENT_ID = process.env.OPENCLAW_AGENT || 'main';
@@ -21,11 +22,12 @@ const AUTH_DATA_DIR = process.env.DASHBOARD_AUTH_DIR || dataDir;
 const auditLogPath = path.join(AUTH_DATA_DIR, 'audit.log');
 const credentialsFile = path.join(AUTH_DATA_DIR, 'credentials.json');
 const mfaSecretFile = path.join(AUTH_DATA_DIR, 'mfa-secret.txt');
+const configPath = process.env.OPENCLAW_CONFIG || path.join(OPENCLAW_DIR, 'openclaw.json');
 
 const skillsDir = path.join(WORKSPACE_DIR, 'skills');
 const configFiles = [
   { name: 'openclaw-gateway.service', path: path.join(os.homedir(), '.config/systemd/user/openclaw-gateway.service') },
-  { name: 'openclaw-config.json',     path: path.join(os.homedir(), '.openclaw/config.json') },
+  { name: 'openclaw-config.json',     path: configPath },
 ];
 const workspaceFilenames = ['AGENTS.md','HEARTBEAT.md','IDENTITY.md','MEMORY.md','SOUL.md','TOOLS.md','USER.md'];
 const claudeUsageFile = path.join(dataDir, 'claude-usage.json');
@@ -36,137 +38,21 @@ const pricingFile = path.join(WORKSPACE_DIR, 'data', 'model_pricing_usd_per_mill
 
 const htmlPath = path.join(__dirname, 'index.html');
 
-const DEFAULT_MODEL_PRICING = {
-  'anthropic/claude-opus-4-6': { input: 15.00, output: 75.00, cacheRead: 1.875, cacheWrite: 18.75 },
-  'anthropic/claude-opus-4-5': { input: 15.00, output: 75.00, cacheRead: 1.875, cacheWrite: 18.75 },
-  'anthropic/claude-sonnet-4-6': { input: 3.00, output: 15.00, cacheRead: 0.30, cacheWrite: 3.75 },
-  'anthropic/claude-sonnet-4-5': { input: 3.00, output: 15.00, cacheRead: 0.30, cacheWrite: 3.75 },
-  'anthropic/claude-3-5-haiku-latest': { input: 0.80, output: 4.00, cacheRead: 0.08, cacheWrite: 1.00 },
-  'openai/gpt-4o-mini': { input: 0.15, output: 0.60, cacheRead: 0.075, cacheWrite: 0.30 },
-  'openai/gpt-4.1-mini': { input: 0.40, output: 1.60, cacheRead: 0.20, cacheWrite: 0.80 },
-  'google/gemini-3-pro-preview': { input: 1.25, output: 10.00, cacheRead: 0.31, cacheWrite: 4.50 },
-  'google/gemini-3-flash-preview': { input: 0.15, output: 0.60, cacheRead: 0.04, cacheWrite: 0.15 },
-  'xai/grok-4-1-fast': { input: 0.20, output: 0.50, cacheRead: 0.05, cacheWrite: 0.20 }
-};
-
-function toNum(v) {
-  const n = Number(v);
-  return Number.isFinite(n) ? n : 0;
-}
-
-function normalizeProvider(provider) {
-  return String(provider || 'unknown').trim().toLowerCase();
-}
-
-function normalizeModel(provider, model) {
-  const p = normalizeProvider(provider);
-  let m = String(model || 'unknown').trim();
-  const pref = p + '/';
-  if (m.toLowerCase().startsWith(pref)) m = m.slice(pref.length);
-  const ml = m.toLowerCase();
-  if (p === 'anthropic') {
-    if (ml.startsWith('claude-opus-4-6')) return 'claude-opus-4-6';
-    if (ml.startsWith('claude-opus-4-5')) return 'claude-opus-4-5';
-    if (ml.startsWith('claude-sonnet-4-6')) return 'claude-sonnet-4-6';
-    if (ml.startsWith('claude-sonnet-4-5')) return 'claude-sonnet-4-5';
-    if (ml.startsWith('claude-3-5-haiku')) return 'claude-3-5-haiku-latest';
-  }
-  if (p === 'openai') {
-    if (ml.startsWith('gpt-4o-mini')) return 'gpt-4o-mini';
-    if (ml.startsWith('gpt-4.1-mini')) return 'gpt-4.1-mini';
-  }
-  if (p === 'google' && ml.startsWith('gemini-3-flash-preview')) return 'gemini-3-flash-preview';
-  if (p === 'xai' && ml.startsWith('grok-4-1-fast')) return 'grok-4-1-fast';
-  if (p === 'nvidia' && ml.includes('kimi-k2.5')) return 'moonshotai/kimi-k2.5';
-  return m;
-}
-
-function loadModelPricing() {
-  try {
-    if (!fs.existsSync(pricingFile)) return { ...DEFAULT_MODEL_PRICING };
-    const parsed = JSON.parse(fs.readFileSync(pricingFile, 'utf8'));
-    const rates = parsed && parsed.rates_usd_per_million;
-    if (!rates || typeof rates !== 'object') return { ...DEFAULT_MODEL_PRICING };
-    const out = {};
-    for (const [k, v] of Object.entries(rates)) {
-      if (!k.includes('/') || !v || typeof v !== 'object') continue;
-      out[String(k)] = {
-        input: toNum(v.input),
-        output: toNum(v.output),
-        cacheRead: toNum(v.cacheRead),
-        cacheWrite: toNum(v.cacheWrite)
-      };
-    }
-    return Object.keys(out).length ? out : { ...DEFAULT_MODEL_PRICING };
-  } catch {
-    return { ...DEFAULT_MODEL_PRICING };
-  }
-}
-
-const MODEL_PRICING = loadModelPricing();
-
-function inferProviderFromModel(model) {
-  const m = String(model || '').toLowerCase();
-  if (m.startsWith('claude-')) return 'anthropic';
-  if (m.startsWith('gpt-') || m.startsWith('o1') || m.startsWith('o3')) return 'openai';
-  if (m.startsWith('gemini-')) return 'google';
-  if (m.startsWith('grok-')) return 'xai';
-  return null;
-}
-
-function lookupRates(provider, modelNorm) {
-  // Exact match first
-  const rates = MODEL_PRICING[`${provider}/${modelNorm}`];
-  if (rates) return rates;
-  // For custom/unknown providers, try to infer from model name
-  const inferredProvider = inferProviderFromModel(modelNorm);
-  if (inferredProvider && inferredProvider !== provider) {
-    const inferredModelNorm = normalizeModel(inferredProvider, modelNorm);
-    return MODEL_PRICING[`${inferredProvider}/${inferredModelNorm}`] || null;
-  }
-  return null;
-}
-
-function estimateMsgCost(msg) {
-  const usage = msg && msg.usage ? msg.usage : {};
-  const explicit = toNum(usage.cost && usage.cost.total);
-  if (explicit > 0) return explicit;
-  const provider = normalizeProvider(msg && msg.provider);
-  const modelNorm = normalizeModel(provider, msg && msg.model);
-  const rates = lookupRates(provider, modelNorm);
-  if (!rates) return 0;
-  const input = Math.max(0, toNum(usage.input)) / 1_000_000;
-  const output = Math.max(0, toNum(usage.output)) / 1_000_000;
-  const cacheRead = Math.max(0, toNum(usage.cacheRead)) / 1_000_000;
-  const cacheWrite = Math.max(0, toNum(usage.cacheWrite)) / 1_000_000;
-  return (
-    input * toNum(rates.input) +
-    output * toNum(rates.output) +
-    cacheRead * toNum(rates.cacheRead) +
-    cacheWrite * toNum(rates.cacheWrite)
-  );
-}
+const { createPricing, normalizeProvider, normalizeModel, inferProviderFromModel, usageTokens } = require('./lib/pricing');
+const { getCostInfo } = createPricing(pricingFile);
 
 try { fs.mkdirSync(dataDir, { recursive: true }); } catch {}
-try { fs.mkdirSync(path.dirname(auditLogPath), { recursive: true }); } catch {}
-try { fs.mkdirSync(path.dirname(credentialsFile), { recursive: true }); } catch {}
+fs.mkdirSync(AUTH_DATA_DIR, { recursive: true, mode: 0o700 });
+fs.chmodSync(AUTH_DATA_DIR, 0o700);
+if (fs.existsSync(credentialsFile)) fs.chmodSync(credentialsFile, 0o600);
+if (fs.existsSync(mfaSecretFile)) fs.chmodSync(mfaSecretFile, 0o600);
 
 // The recovery token is a secret: it is never written to stdout/stderr (the journal).
-// If DASHBOARD_TOKEN is not set, a random one is generated and stored in a 0600 file.
-let DASHBOARD_TOKEN = process.env.DASHBOARD_TOKEN;
-if (!DASHBOARD_TOKEN) {
-  DASHBOARD_TOKEN = crypto.randomBytes(16).toString('hex');
-  const recoveryTokenFile = path.join(dataDir, 'recovery-token');
-  try {
-    fs.writeFileSync(recoveryTokenFile, DASHBOARD_TOKEN + '\n', { mode: 0o600 });
-    fs.chmodSync(recoveryTokenFile, 0o600);
-    console.log('Recovery token generated (not printed). Read it from: ' + recoveryTokenFile);
-  } catch (err) {
-    console.log('Recovery token generated but could not be written to a file: ' + err.code);
-  }
-} else {
-  console.log('Recovery token provided via DASHBOARD_TOKEN env (not printed).');
-}
+// Otherwise the same private file is reused across restarts.
+const DASHBOARD_TOKEN = loadRecoveryToken(AUTH_DATA_DIR, process.env.DASHBOARD_TOKEN);
+console.log(process.env.DASHBOARD_TOKEN
+  ? 'Recovery token provided via DASHBOARD_TOKEN env (not printed).'
+  : 'Recovery token stored privately at: ' + path.join(AUTH_DATA_DIR, 'recovery-token.txt'));
 
 let MFA_SECRET = process.env.DASHBOARD_MFA_SECRET;
 if (!MFA_SECRET && fs.existsSync(mfaSecretFile)) {
@@ -200,9 +86,7 @@ function getCredentials() {
 }
 
 function saveCredentials(creds) {
-  const tmp = credentialsFile + '.tmp.' + Date.now();
-  fs.writeFileSync(tmp, JSON.stringify(creds, null, 2), 'utf8');
-  fs.renameSync(tmp, credentialsFile);
+  atomicWriteFileSync(credentialsFile, JSON.stringify(creds, null, 2));
 }
 
 function generateSessionToken() {
@@ -324,13 +208,11 @@ function setSecurityHeaders(res) {
 }
 
 function setSameSiteCORS(req, res) {
-  const origin = req.headers.origin || req.headers.referer;
   const host = req.headers.host;
-  if (origin && origin.includes(host)) {
-    res.setHeader('Access-Control-Allow-Origin', origin);
-  } else if (!origin) {
-    const proto = req.socket.encrypted || req.headers['x-forwarded-proto'] === 'https' ? 'https' : 'http';
-    res.setHeader('Access-Control-Allow-Origin', `${proto}://${host}`);
+  const proto = isHTTPS(req, process.env.DASHBOARD_TRUSTED_PROXIES) ? 'https' : 'http';
+  const expectedOrigin = `${proto}://${host}`;
+  if (req.headers.origin === expectedOrigin || !req.headers.origin) {
+    res.setHeader('Access-Control-Allow-Origin', expectedOrigin);
   }
 }
 
@@ -381,7 +263,7 @@ function httpsEnforcement(req, res) {
   const ip = getClientIP(req);
   if (isLocalhost(ip)) return true;
   if (isTailscaleIP(ip)) return true;
-  if (req.socket.encrypted || req.headers['x-forwarded-proto'] === 'https') return true;
+  if (isHTTPS(req, process.env.DASHBOARD_TRUSTED_PROXIES)) return true;
   setSecurityHeaders(res);
   res.writeHead(403, { 'Content-Type': 'text/plain' });
   res.end('HTTPS required. Access via localhost, Tailscale, or enable HTTPS.');
@@ -415,8 +297,20 @@ function isAuthenticated(req) {
     }
     session.lastActivity = now;
   }
-  
+  req.authSession = session;
   return true;
+}
+
+function requireFreshReauth(req, res) {
+  if (hasFreshReauth(req.authSession)) return true;
+  if (req.authSession) delete req.authSession.reauthAt;
+  res.writeHead(403, { 'Content-Type': 'application/json' });
+  res.end(JSON.stringify({ error: 'Re-authentication required', code: 'REAUTH_REQUIRED' }));
+  return false;
+}
+
+function invalidateReauthGrants() {
+  for (const session of sessions.values()) delete session.reauthAt;
 }
 
 function requireAuth(req, res) {
@@ -511,34 +405,36 @@ function getLastMessage(sessionId) {
 function isSessionFile(f) { return f.endsWith('.jsonl') || f.includes('.jsonl.reset.'); }
 function extractSessionId(f) { return f.replace(/\.jsonl(?:\.reset\.\d+)?$/, ''); }
 
-let sessionCostCache = {};
+let sessionCostCache = Object.create(null);
 let sessionCostCacheTime = 0;
 
-function getSessionCost(sessionId) {
+function getSessionPricing(sessionId) {
   const now = Date.now();
   if (now - sessionCostCacheTime > 60000) {
-    sessionCostCache = {};
+    sessionCostCache = Object.create(null);
     sessionCostCacheTime = now;
     try {
       const files = fs.readdirSync(sessDir).filter(f => isSessionFile(f));
       for (const file of files) {
         const sid = extractSessionId(file);
-        let total = 0;
+        const summary = sessionCostCache[sid] || { cost: 0, unpricedMessages: 0 };
         const lines = fs.readFileSync(path.join(sessDir, file), 'utf8').split('\n');
         for (const line of lines) {
           if (!line.trim()) continue;
           try {
             const d = JSON.parse(line);
-            if (d.type !== 'message') continue;
-            const c = estimateMsgCost(d.message || {});
-            if (c > 0) total += c;
+            if (d.type !== 'message' || !d.message?.usage) continue;
+            const info = getCostInfo(d.message);
+            summary.cost += info.cost;
+            if (!info.priced) summary.unpricedMessages++;
           } catch {}
         }
-        if (total > 0) sessionCostCache[sid] = Math.round(total * 100) / 100;
+        sessionCostCache[sid] = summary;
       }
     } catch {}
   }
-  return sessionCostCache[sessionId] || 0;
+  const summary = sessionCostCache[sessionId] || { cost: 0, unpricedMessages: 0 };
+  return { cost: Math.round(summary.cost * 100) / 100, costKnown: summary.unpricedMessages === 0, unpricedMessages: summary.unpricedMessages };
 }
 
 function getSessionsJson() {
@@ -559,7 +455,7 @@ function getSessionsJson() {
       channel: s.channel || '-',
       sessionId: s.sessionId || '-',
       lastMessage: getLastMessage(s.sessionId || key),
-      cost: getSessionCost(s.sessionId || key)
+      ...getSessionPricing(s.sessionId || key)
     }));
   } catch (e) { return []; }
 }
@@ -567,9 +463,12 @@ function getSessionsJson() {
 function getCostData() {
   try {
     const files = fs.readdirSync(sessDir).filter(f => isSessionFile(f));
-    const perModel = {};
-    const perDay = {};
-    const perSession = {};
+    const perModel = Object.create(null);
+    const perDay = Object.create(null);
+    const perSession = Object.create(null);
+    const unpricedPerModel = Object.create(null);
+    const unpricedPerSession = Object.create(null);
+    let unpricedMessages = 0;
     let total = 0;
 
     for (const file of files) {
@@ -583,21 +482,27 @@ function getCostData() {
           if (d.type !== 'message') continue;
           const msg = d.message;
           if (!msg || !msg.usage) continue;
-          const c = estimateMsgCost(msg);
-          if (c <= 0) continue;
+          const info = getCostInfo(msg);
+          if (info.source === 'ignored') continue;
+          const c = info.cost;
           const provider = normalizeProvider(msg.provider);
           const model = normalizeModel(provider, msg.model);
           if (model.includes('delivery-mirror')) continue;
           const ts = d.timestamp || '';
           const day = ts.substring(0, 10);
           const modelKey = `${provider}/${model}`;
+          if (!info.priced) {
+            unpricedMessages++;
+            unpricedPerModel[modelKey] = (unpricedPerModel[modelKey] || 0) + 1;
+            unpricedPerSession[sid] = (unpricedPerSession[sid] || 0) + 1;
+          }
           perModel[modelKey] = (perModel[modelKey] || 0) + c;
           perDay[day] = (perDay[day] || 0) + c;
           scost += c;
           total += c;
         } catch {}
       }
-      if (scost > 0) perSession[sid] = scost;
+      if (scost > 0 || unpricedPerSession[sid]) perSession[sid] = (perSession[sid] || 0) + scost;
     }
 
     const now = new Date();
@@ -613,6 +518,8 @@ function getCostData() {
       today: Math.round((perDay[todayKey] || 0) * 100) / 100,
       week: Math.round(weekCost * 100) / 100,
       perModel,
+      unpricedMessages,
+      unpricedPerModel,
       perDay: Object.fromEntries(Object.entries(perDay).sort((a, b) => b[0].localeCompare(a[0])).slice(0, 14)),
       perSession: (() => {
         let sidLabels = {};
@@ -668,12 +575,12 @@ function getCostData() {
                 }
               } catch {}
             }
-            return [sid, { cost, label: label || ('session-' + sid.substring(0, 8)) }];
+            return [sid, { cost, costKnown: !unpricedPerSession[sid], unpricedMessages: unpricedPerSession[sid] || 0, label: label || ('session-' + sid.substring(0, 8)) }];
           })
         );
       })()
     };
-  } catch (e) { return { total: 0, today: 0, week: 0, perModel: {}, perDay: {}, perSession: {} }; }
+  } catch (e) { return { total: 0, today: 0, week: 0, perModel: {}, perDay: {}, perSession: {}, unpricedMessages: 0, unpricedPerModel: {} }; }
 }
 
 let costCache = null;
@@ -685,12 +592,13 @@ function getUsageWindows() {
     const fiveHoursMs = 5 * 3600000;
     const oneWeekMs = 7 * 86400000;
     const files = fs.readdirSync(sessDir).filter(f => {
-      if (!f.endsWith('.jsonl')) return false;
+      if (!isSessionFile(f)) return false;
       try { return fs.statSync(path.join(sessDir, f)).mtimeMs > now - oneWeekMs; } catch { return false; }
     });
 
-    const perModel5h = {};
-    const perModelWeek = {};
+    const perModel5h = Object.create(null);
+    const perModelWeek = Object.create(null);
+    const perModelCost5h = Object.create(null);
     const recentMessages = [];
 
     for (const file of files) {
@@ -707,32 +615,50 @@ function getUsageWindows() {
           const provider = normalizeProvider(msg.provider);
           const model = normalizeModel(provider, msg.model);
           const modelKey = `${provider}/${model}`;
-          const inTok = Math.max(0, toNum(msg.usage.input));
-          const outTok = Math.max(0, toNum(msg.usage.output));
-          const cacheReadTok = Math.max(0, toNum(msg.usage.cacheRead));
-          const cacheWriteTok = Math.max(0, toNum(msg.usage.cacheWrite));
-          const cost = estimateMsgCost(msg);
+          const info = getCostInfo(msg);
+          if (info.source === 'ignored') continue;
+          const tokenUsage = usageTokens(msg.usage, inferProviderFromModel(model) || provider);
+          const inTok = tokenUsage.input;
+          const outTok = tokenUsage.output;
+          const cacheReadTok = tokenUsage.cacheRead;
+          const cacheWriteTok = tokenUsage.cacheWrite;
+          const cost = info.cost;
 
           if (now - ts < fiveHoursMs) {
-            if (!perModel5h[modelKey]) perModel5h[modelKey] = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, calls: 0 };
+            if (!perModel5h[modelKey]) perModel5h[modelKey] = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, calls: 0, costKnown: true, unpricedMessages: 0 };
             perModel5h[modelKey].input += inTok;
             perModel5h[modelKey].output += outTok;
             perModel5h[modelKey].cacheRead += cacheReadTok;
             perModel5h[modelKey].cacheWrite += cacheWriteTok;
             perModel5h[modelKey].cost += cost;
             perModel5h[modelKey].calls++;
+            if (!info.priced) {
+              perModel5h[modelKey].costKnown = false;
+              perModel5h[modelKey].unpricedMessages++;
+            }
+            if (!perModelCost5h[modelKey]) perModelCost5h[modelKey] = { inputCost: 0, outputCost: 0, cacheReadCost: 0, cacheWriteCost: 0, totalCost: 0, costKnown: true, unpricedMessages: 0, breakdownKnown: true };
+            const breakdown = perModelCost5h[modelKey];
+            for (const field of ['inputCost', 'outputCost', 'cacheReadCost', 'cacheWriteCost']) breakdown[field] += info.breakdown?.[field] || 0;
+            if (!info.breakdown) breakdown.breakdownKnown = false;
+            breakdown.totalCost += cost;
+            breakdown.costKnown = perModel5h[modelKey].costKnown;
+            breakdown.unpricedMessages = perModel5h[modelKey].unpricedMessages;
           }
           if (now - ts < oneWeekMs) {
-            if (!perModelWeek[modelKey]) perModelWeek[modelKey] = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, calls: 0 };
+            if (!perModelWeek[modelKey]) perModelWeek[modelKey] = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, calls: 0, costKnown: true, unpricedMessages: 0 };
             perModelWeek[modelKey].input += inTok;
             perModelWeek[modelKey].output += outTok;
             perModelWeek[modelKey].cacheRead += cacheReadTok;
             perModelWeek[modelKey].cacheWrite += cacheWriteTok;
             perModelWeek[modelKey].cost += cost;
             perModelWeek[modelKey].calls++;
+            if (!info.priced) {
+              perModelWeek[modelKey].costKnown = false;
+              perModelWeek[modelKey].unpricedMessages++;
+            }
           }
           if (now - ts < fiveHoursMs) {
-            recentMessages.push({ ts, model: modelKey, input: inTok, output: outTok, cacheRead: cacheReadTok, cacheWrite: cacheWriteTok, cost });
+            recentMessages.push({ ts, model: modelKey, input: inTok, output: outTok, cacheRead: cacheReadTok, cacheWrite: cacheWriteTok, cost, costKnown: info.priced });
           }
         } catch {}
       }
@@ -768,31 +694,13 @@ function getUsageWindows() {
     const opusRemaining = estimatedLimits.opus - opusOut;
     const timeToLimit = burnTokensPerMin > 0 ? (opusRemaining / burnTokensPerMin) * 60000 : null;
 
-    const perModelCost5h = {};
-    for (const [model, data] of Object.entries(perModel5h)) {
-      const slash = model.indexOf('/');
-      const provider = slash >= 0 ? model.slice(0, slash) : 'unknown';
-      const modelName = slash >= 0 ? model.slice(slash + 1) : model;
-      const rates = lookupRates(provider, modelName) || {};
-      const inputCost = (data.input || 0) / 1000000 * toNum(rates.input);
-      const outputCost = (data.output || 0) / 1000000 * toNum(rates.output);
-      const cacheReadCost = (data.cacheRead || 0) / 1000000 * toNum(rates.cacheRead);
-      const cacheWriteCost = (data.cacheWrite || 0) / 1000000 * toNum(rates.cacheWrite);
-      perModelCost5h[model] = {
-        inputCost,
-        outputCost,
-        cacheReadCost,
-        cacheWriteCost,
-        totalCost: data.cost || (inputCost + outputCost + cacheReadCost + cacheWriteCost)
-      };
-    }
-
     const totalCost5h = Object.values(perModel5h).reduce((s, m) => s + (m.cost || 0), 0);
     const totalCalls5h = Object.values(perModel5h).reduce((s, m) => s + (m.calls || 0), 0);
     const costLimit = 35.0;
     const messageLimit = 1000;
 
     return {
+      unpricedMessages: Object.values(perModel5h).reduce((sum, model) => sum + model.unpricedMessages, 0),
       fiveHour: {
         perModel: perModel5h,
         perModelCost: perModelCost5h,
@@ -823,7 +731,7 @@ function getUsageWindows() {
       predictions: { timeToLimit: timeToLimit ? Math.round(timeToLimit) : null, safe: !timeToLimit || timeToLimit > 3600000 }
     };
   } catch (e) {
-    return { fiveHour: { perModel: {} }, weekly: { perModel: {} } };
+    return { fiveHour: { perModel: {}, perModelCost: {}, recentCalls: [] }, weekly: { perModel: {} }, unpricedMessages: 0 };
   }
 }
 
@@ -1155,13 +1063,13 @@ function getCronJobs() {
 
 function getGitActivity() {
   try {
-    const { execSync } = require('child_process');
+    const { execFileSync } = require('child_process');
     const repos = getGitRepos();
     const commits = [];
     for (const repo of repos) {
       try {
         if (!fs.existsSync(path.join(repo.path, '.git'))) continue;
-        const log = execSync(`git -C ${repo.path} log --oneline --since='7 days ago' -10 --format='%H|%s|%at'`, { encoding: 'utf8', timeout: 5000 }).trim();
+        const log = execFileSync('git', ['-C', repo.path, 'log', '--oneline', '--since=7 days ago', '-10', '--format=%H|%s|%at'], { encoding: 'utf8', timeout: 5000 }).trim();
         if (!log) continue;
         log.split('\n').forEach(line => {
           const [hash, msg, ts] = line.split('|');
@@ -1772,12 +1680,13 @@ const server = http.createServer((req, res) => {
 
   if (req.url === '/api/auth/setup-mfa' && req.method === 'POST') {
     if (!requireAuth(req, res)) return;
+    if ((getCredentials()?.mfaSecret || MFA_SECRET) && !requireFreshReauth(req, res)) return;
     setSameSiteCORS(req, res);
     
     try {
       const secret = base32Encode(crypto.randomBytes(20));
       const otpauth_uri = `otpauth://totp/OpenClaw:Dashboard?secret=${secret}&issuer=OpenClaw&algorithm=SHA1&digits=6&period=30`;
-      pendingMfaSecrets.set(getClientIP(req), { secret, createdAt: Date.now() });
+      pendingMfaSecrets.set(req.authSession, { secret, createdAt: Date.now() });
       res.writeHead(200, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ secret, otpauth_uri }));
     } catch (e) {
@@ -1789,6 +1698,7 @@ const server = http.createServer((req, res) => {
 
   if (req.url === '/api/auth/confirm-mfa' && req.method === 'POST') {
     if (!requireAuth(req, res)) return;
+    if ((getCredentials()?.mfaSecret || MFA_SECRET) && !requireFreshReauth(req, res)) return;
     setSameSiteCORS(req, res);
     
     let body = '';
@@ -1797,10 +1707,10 @@ const server = http.createServer((req, res) => {
       try {
         const { totpCode } = JSON.parse(body);
         const ip = getClientIP(req);
-        const pending = pendingMfaSecrets.get(ip);
+        const pending = pendingMfaSecrets.get(req.authSession);
         
         if (!pending || Date.now() - pending.createdAt > 10 * 60 * 1000) {
-          pendingMfaSecrets.delete(ip);
+          pendingMfaSecrets.delete(req.authSession);
           res.writeHead(400, { 'Content-Type': 'application/json' });
           res.end(JSON.stringify({ error: 'MFA setup expired. Please try again.' }));
           return;
@@ -1817,7 +1727,8 @@ const server = http.createServer((req, res) => {
           creds.mfaSecret = pending.secret;
           saveCredentials(creds);
         }
-        pendingMfaSecrets.delete(ip);
+        pendingMfaSecrets.delete(req.authSession);
+        invalidateReauthGrants();
         auditLog('mfa_setup', ip);
         res.writeHead(200, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ success: true }));
@@ -1859,6 +1770,7 @@ const server = http.createServer((req, res) => {
           delete creds.mfaSecret;
           saveCredentials(creds);
         }
+        invalidateReauthGrants();
         
         auditLog('mfa_disabled', getClientIP(req));
         res.writeHead(200, { 'Content-Type': 'application/json' });
@@ -2000,8 +1912,10 @@ const server = http.createServer((req, res) => {
       return;
     }
     if (req.url === '/api/reauth' && req.method === 'POST') {
+      // Starting a failed or malformed attempt must revoke any previous grant.
+      delete req.authSession.reauthAt;
       let body = '';
-      req.on('data', c => body += c);
+      req.on('data', c => { body += c; if (body.length > 4096) req.destroy(); });
       req.on('end', () => {
         try {
           const { password, totp } = JSON.parse(body);
@@ -2017,8 +1931,9 @@ const server = http.createServer((req, res) => {
           const mfaSecret = creds.mfaSecret || MFA_SECRET;
           if (mfaSecret) {
             if (!totp) { res.writeHead(401, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ error: 'TOTP required', needsTotp: true })); return; }
-            if (!verifyTOTP(mfaSecret, totp)) { res.writeHead(401, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ error: 'Invalid TOTP code' })); return; }
+            if (!verifyTOTP(mfaSecret, totp)) { recordFailedAuth(ip); res.writeHead(401, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ error: 'Invalid TOTP code' })); return; }
           }
+          req.authSession.reauthAt = Date.now();
           auditLog('reauth_success', ip, {});
           res.writeHead(200, { 'Content-Type': 'application/json' });
           res.end(JSON.stringify({ ok: true }));
@@ -2027,8 +1942,7 @@ const server = http.createServer((req, res) => {
       return;
     }
     if (req.url === '/api/openclaw-config' && req.method === 'GET') {
-      if (!requireAuth(req, res)) return;
-      const configPath = process.env.OPENCLAW_CONFIG || path.join(process.env.HOME || '/root', '.openclaw', 'openclaw.json');
+      if (!requireFreshReauth(req, res)) return;
       try {
         const content = fs.readFileSync(configPath, 'utf8');
         JSON.parse(content);
@@ -2039,17 +1953,17 @@ const server = http.createServer((req, res) => {
       return;
     }
     if (req.url === '/api/openclaw-config' && req.method === 'PUT') {
-      if (!requireAuth(req, res)) return;
+      if (!requireFreshReauth(req, res)) return;
       let body = '';
       req.on('data', c => { body += c; if (body.length > 1048576) req.destroy(); });
       req.on('end', () => {
         try {
           const { config } = JSON.parse(body);
           JSON.parse(config);
-          const configPath = process.env.OPENCLAW_CONFIG || path.join(process.env.HOME || '/root', '.openclaw', 'openclaw.json');
-          const backupPath = configPath + '.bak.' + Date.now();
-          fs.copyFileSync(configPath, backupPath);
-          fs.writeFileSync(configPath, config, 'utf8');
+          const targetPath = fs.realpathSync(configPath);
+          const backupPath = configPath + '.bak.' + Date.now() + '.' + crypto.randomBytes(4).toString('hex');
+          atomicWriteFileSync(backupPath, fs.readFileSync(targetPath));
+          atomicWriteFileSync(targetPath, config);
           auditLog('config_saved', ip, { backup: backupPath });
           const { execSync } = require('child_process');
           try { execSync('openclaw gateway restart', { timeout: 15000 }); } catch(e) {}
@@ -2117,6 +2031,7 @@ const server = http.createServer((req, res) => {
       return;
     }
     if (req.url === '/api/sys-security') {
+      if (!requireFreshReauth(req, res)) return;
       const { execSync } = require('child_process');
       const run = (cmd) => { try { return execSync(cmd, { timeout: 10000 }).toString(); } catch(e) { return e.stdout ? e.stdout.toString() : 'Error: ' + e.message; } };
       const data = {
@@ -2403,7 +2318,7 @@ const server = http.createServer((req, res) => {
           return;
         }
         const files = fs.readdirSync(sessDir).filter(f => isSessionFile(f));
-        let totalTokens = 0, totalMessages = 0, totalCost = 0, totalSessions = files.length;
+        let totalTokens = 0, totalMessages = 0, totalCost = 0, totalSessions = new Set(files.map(extractSessionId)).size, unpricedMessages = 0;
         let firstSessionDate = null;
         const activeDays = new Set();
         for (const file of files) {
@@ -2416,10 +2331,11 @@ const server = http.createServer((req, res) => {
               totalMessages++;
               const msg = d.message;
               if (msg?.usage) {
-                const inTok = (msg.usage.input || 0) + (msg.usage.cacheRead || 0) + (msg.usage.cacheWrite || 0);
-                const outTok = msg.usage.output || 0;
-                totalTokens += inTok + outTok;
-                totalCost += estimateMsgCost(msg);
+                const tokens = usageTokens(msg.usage, inferProviderFromModel(msg.model) || normalizeProvider(msg.provider));
+                totalTokens += tokens.input + tokens.cacheRead + tokens.cacheWrite + tokens.output;
+                const info = getCostInfo(msg);
+                totalCost += info.cost;
+                if (!info.priced) unpricedMessages++;
               }
               if (d.timestamp) {
                 const ts = new Date(d.timestamp).getTime();
@@ -2434,6 +2350,7 @@ const server = http.createServer((req, res) => {
           totalTokens,
           totalMessages,
           totalCost: Math.round(totalCost * 100) / 100,
+          unpricedMessages,
           totalSessions,
           firstSessionDate,
           daysActive: activeDays.size
@@ -2442,7 +2359,7 @@ const server = http.createServer((req, res) => {
         global[cacheKey + 'Time'] = now;
         res.end(JSON.stringify(result));
       } catch (e) {
-        res.end(JSON.stringify({ totalTokens: 0, totalMessages: 0, totalCost: 0, totalSessions: 0, firstSessionDate: null, daysActive: 0 }));
+        res.end(JSON.stringify({ totalTokens: 0, totalMessages: 0, totalCost: 0, totalSessions: 0, firstSessionDate: null, daysActive: 0, unpricedMessages: 0 }));
       }
       return;
     }
@@ -2489,6 +2406,7 @@ const server = http.createServer((req, res) => {
       try {
         const params = new URL(req.url, 'http://localhost').searchParams;
         const name = params.get('path') || '';
+        if (name === 'openclaw-config.json' && !requireFreshReauth(req, res)) return;
         const allowed = buildKeyFilesAllowed();
         if (!allowed[name]) {
           res.writeHead(403, { 'Content-Type': 'text/plain' });

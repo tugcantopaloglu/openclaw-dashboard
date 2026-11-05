@@ -12,7 +12,7 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        node: [20, 22]
+        node: [22, 24, 26]
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
@@ -20,3 +20,17 @@ jobs:
           node-version: ${{ matrix.node }}
       - run: node --check server.js
       - run: node --test
+      - run: bash -n install.sh scripts/scrape-claude-usage.sh
+
+  docker:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: 24
+      - run: docker build -t openclaw-dashboard:ci .
+      - run: docker run -d --name dashboard-ci -p 127.0.0.1:3001:3001 -e WORKSPACE_DIR=/app/workspace -e OPENCLAW_DIR=/app/openclaw -e DASHBOARD_AUTH_DIR=/app/auth openclaw-dashboard:ci
+      - run: node scripts/smoke-docker.cjs
+      - if: always()
+        run: docker logs dashboard-ci && docker rm -f dashboard-ci
