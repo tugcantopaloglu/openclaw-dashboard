@@ -6,6 +6,7 @@ const { exec } = require('child_process');
 const crypto = require('crypto');
 
 const PORT = parseInt(process.env.DASHBOARD_PORT || '7000');
+const HOST = process.env.DASHBOARD_HOST || '127.0.0.1';
 const OPENCLAW_DIR = process.env.OPENCLAW_DIR || path.join(os.homedir(), '.openclaw');
 const WORKSPACE_DIR = process.env.WORKSPACE_DIR || process.env.OPENCLAW_WORKSPACE || process.cwd();
 const AGENT_ID = process.env.OPENCLAW_AGENT || 'main';
@@ -150,22 +151,22 @@ try { fs.mkdirSync(dataDir, { recursive: true }); } catch {}
 try { fs.mkdirSync(path.dirname(auditLogPath), { recursive: true }); } catch {}
 try { fs.mkdirSync(path.dirname(credentialsFile), { recursive: true }); } catch {}
 
+// The recovery token is a secret: it is never written to stdout/stderr (the journal).
+// If DASHBOARD_TOKEN is not set, a random one is generated and stored in a 0600 file.
 let DASHBOARD_TOKEN = process.env.DASHBOARD_TOKEN;
 if (!DASHBOARD_TOKEN) {
   DASHBOARD_TOKEN = crypto.randomBytes(16).toString('hex');
+  const recoveryTokenFile = path.join(dataDir, 'recovery-token');
+  try {
+    fs.writeFileSync(recoveryTokenFile, DASHBOARD_TOKEN + '\n', { mode: 0o600 });
+    fs.chmodSync(recoveryTokenFile, 0o600);
+    console.log('Recovery token generated (not printed). Read it from: ' + recoveryTokenFile);
+  } catch (err) {
+    console.log('Recovery token generated but could not be written to a file: ' + err.code);
+  }
+} else {
+  console.log('Recovery token provided via DASHBOARD_TOKEN env (not printed).');
 }
-
-console.log('');
-console.log('═══════════════════════════════════════════════════════════');
-console.log('  🔐 Recovery Token');
-console.log('═══════════════════════════════════════════════════════════');
-console.log('');
-console.log('  ' + DASHBOARD_TOKEN);
-console.log('');
-console.log('  Use this token to reset your password if forgotten.');
-console.log('  Set DASHBOARD_TOKEN env variable for a custom token.');
-console.log('═══════════════════════════════════════════════════════════');
-console.log('');
 
 let MFA_SECRET = process.env.DASHBOARD_MFA_SECRET;
 if (!MFA_SECRET && fs.existsSync(mfaSecretFile)) {
@@ -2651,6 +2652,6 @@ const server = http.createServer((req, res) => {
   }
 });
 
-server.listen(PORT, '0.0.0.0', () => {
-  console.log('Dashboard: http://0.0.0.0:' + PORT);
+server.listen(PORT, HOST, () => {
+  console.log('Dashboard: http://' + HOST + ':' + PORT);
 });
