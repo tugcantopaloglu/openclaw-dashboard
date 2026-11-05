@@ -192,6 +192,7 @@ by the container's `node` user, and preserve the auth directory across rebuilds.
 | `DASHBOARD_TOKEN` | Explicit recovery token for password reset; takes precedence over the token file | Persisted random token |
 | `DASHBOARD_AUTH_DIR` | Private credentials, recovery token and audit directory | `$WORKSPACE_DIR/data` |
 | `DASHBOARD_TRUSTED_PROXIES` | Comma-separated exact proxy IPs allowed to supply `X-Forwarded-Proto` | Loopback only |
+| `DASHBOARD_GIT_BIN` | Absolute path to git for a nonstandard installation | Git in standard system installation directories |
 | `WORKSPACE_DIR` | OpenClaw workspace path | `$OPENCLAW_WORKSPACE` or current directory |
 | `OPENCLAW_DIR` | OpenClaw config directory | `~/.openclaw` |
 | `OPENCLAW_CONFIG` | Config Editor file path | `$OPENCLAW_DIR/openclaw.json` |

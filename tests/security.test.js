@@ -3,12 +3,14 @@ const { execFileSync, spawn } = require('node:child_process');
 const crypto = require('node:crypto');
 const { once } = require('node:events');
 const fs = require('node:fs/promises');
+const fsSync = require('node:fs');
+const http = require('node:http');
 const net = require('node:net');
 const os = require('node:os');
 const path = require('node:path');
 const test = require('node:test');
 const { setTimeout: delay } = require('node:timers/promises');
-const { REAUTH_TTL_MS, hasFreshReauth, isHTTPS, isTrustedProxy } = require('../lib/security');
+const { REAUTH_TTL_MS, hasFreshReauth, isHTTPS, isTrustedProxy, atomicWriteFileSync, resolveGitExecutable } = require('../lib/security');
 
 const password = 'Security-test-password-123!';
 
@@ -194,15 +196,109 @@ test('git activity accepts whitespace and shell syntax in repository paths witho
   const repositoryName = 'project with spaces $(echo harmless)';
   const repository = path.join(files.workspace, 'projects', repositoryName);
   await fs.mkdir(repository, { recursive: true });
-  execFileSync('git', ['init', repository], { stdio: 'ignore' });
-  execFileSync('git', ['-C', repository, '-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid', '-c', 'commit.gpgsign=false', '-c', 'core.hooksPath=/dev/null', 'commit', '--allow-empty', '-m', 'Fixture commit'], { stdio: 'ignore' });
-  const server = await startServer(t, files);
+  const gitExecutable = resolveGitExecutable();
+  assert.ok(gitExecutable, 'Install Git in a standard location or set DASHBOARD_GIT_BIN to its absolute path');
+  execFileSync(gitExecutable, ['init', repository], { stdio: 'ignore' });
+  execFileSync(gitExecutable, ['-C', repository, '-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid', '-c', 'commit.gpgsign=false', '-c', 'core.hooksPath=/dev/null', 'commit', '--allow-empty', '-m', 'Fixture commit'], { stdio: 'ignore' });
+  const server = await startServer(t, files, { DASHBOARD_GIT_BIN: gitExecutable });
   const token = await register(server);
   const response = await fetch(server.base + '/api/git', { headers: { Authorization: 'Bearer ' + token } });
   assert.equal(response.status, 200);
   const commits = await response.json();
   assert.ok(commits.some(commit => commit.repo === repositoryName && commit.message === 'Fixture commit'));
   await server.stop();
+  const missingGit = await startServer(t, files, { DASHBOARD_GIT_BIN: path.join(files.directory, 'missing-git') });
+  const login = await jsonRequest(missingGit, '/api/auth/login', null, { username: 'administrator', password });
+  const { sessionToken } = await login.json();
+  const unavailableResponse = await fetch(missingGit.base + '/api/git', { headers: { Authorization: 'Bearer ' + sessionToken } });
+  assert.equal(unavailableResponse.status, 200);
+  assert.deepEqual(await unavailableResponse.json(), [], 'Unavailable configured Git degrades without a PATH lookup');
+  await missingGit.stop();
+});
+
+test('same-origin APIs work without granting access to supplied Origin or Host headers', { timeout: 30000 }, async t => {
+  const files = await fixture(t);
+  const server = await startServer(t, files);
+  const token = await register(server);
+  const sameOrigin = await fetch(server.base + '/api/auth/status', { headers: { Authorization: 'Bearer ' + token, Origin: server.base } });
+  assert.equal(sameOrigin.status, 200);
+  assert.equal((await sameOrigin.json()).loggedIn, true);
+  assert.equal(sameOrigin.headers.get('access-control-allow-origin'), null);
+  assert.equal(sameOrigin.headers.get('vary'), 'Origin');
+  for (const [origin, host] of [
+    ['https://attacker.example', 'attacker.example'],
+    ['https://attacker.example', new URL(server.base).host],
+    ['https://dashboard.example.attacker.example', 'dashboard.example']
+  ]) {
+    for (const method of ['GET', 'OPTIONS']) {
+      // node:http allows an explicit Host header, exercising the actual incoming request.
+      const response = await new Promise((resolve, reject) => {
+        const request = http.request(server.base + '/api/auth/status', { method, headers: { Host: host, Origin: origin, Authorization: 'Bearer ' + token } }, result => {
+          result.resume();
+          result.on('end', () => resolve({ status: result.statusCode, headers: result.headers }));
+        });
+        request.on('error', reject);
+        request.end();
+      });
+      assert.equal(response.status, method === 'OPTIONS' ? 204 : 200);
+      assert.equal(response.headers['access-control-allow-origin'], undefined);
+      assert.equal(response.headers.vary, 'Origin');
+    }
+  }
+  await server.stop();
+});
+
+test('atomic write failure retains the original error and removes its temporary file', async t => {
+  const files = await fixture(t);
+  const destination = path.join(files.auth, 'atomic-write.txt');
+  await fs.writeFile(destination, 'original');
+  const original = new Error('fixture write failed');
+  t.mock.method(fsSync, 'writeFileSync', () => { throw original; });
+  assert.throws(() => atomicWriteFileSync(destination, 'replacement'), error => error === original);
+  t.mock.restoreAll();
+  assert.equal(await fs.readFile(destination, 'utf8'), 'original');
+  assert.deepEqual((await fs.readdir(files.auth)).filter(name => name.includes('.tmp.')), []);
+});
+
+test('atomic write cleanup errors never mask its original failure', async t => {
+  const files = await fixture(t);
+  const destination = path.join(files.auth, 'atomic-cleanup.txt');
+  const original = new Error('fixture write failed before cleanup');
+  const close = fsSync.closeSync;
+  let closed = false;
+  t.mock.method(fsSync, 'writeFileSync', () => { throw original; });
+  t.mock.method(fsSync, 'closeSync', descriptor => {
+    close(descriptor);
+    closed = true;
+    throw new Error('fixture close cleanup failed');
+  });
+  t.mock.method(fsSync, 'unlinkSync', () => { throw new Error('fixture unlink cleanup failed'); });
+  assert.throws(() => atomicWriteFileSync(destination, 'replacement'), error => error === original);
+  t.mock.restoreAll();
+  assert.equal(closed, true);
+  const temporaryFiles = (await fs.readdir(files.auth)).filter(name => name.includes('.tmp.'));
+  assert.equal(temporaryFiles.length, 1);
+  await fs.unlink(path.join(files.auth, temporaryFiles[0]));
+});
+
+test('Git resolution uses absolute configured files or fixed system paths exclusively', t => {
+  const inspected = [];
+  const regularFiles = new Set(['/usr/local/bin/git', 'C:\\Program Files\\Git\\cmd\\git.exe', '/custom/git']);
+  t.mock.method(fsSync, 'statSync', candidate => {
+    inspected.push(candidate);
+    return { isFile: () => regularFiles.has(candidate) };
+  });
+  assert.equal(resolveGitExecutable('', 'linux'), '/usr/local/bin/git');
+  assert.deepEqual(inspected, ['/usr/bin/git', '/usr/local/bin/git']);
+  assert.equal(resolveGitExecutable('', 'win32'), 'C:\\Program Files\\Git\\cmd\\git.exe');
+  assert.equal(resolveGitExecutable('/custom/git', 'linux'), '/custom/git');
+  assert.equal(resolveGitExecutable('git', 'linux'), null, 'Relative override must not search PATH');
+  assert.equal(resolveGitExecutable('/missing/git', 'linux'), null, 'Invalid explicit override does not fall back');
+  assert.equal(resolveGitExecutable('/directory/git', 'linux'), null, 'Directories are not executable file overrides');
+  regularFiles.clear();
+  inspected.length = 0;
+  assert.equal(resolveGitExecutable('', 'linux'), null);
+  assert.deepEqual(inspected, ['/usr/bin/git', '/usr/local/bin/git', '/opt/homebrew/bin/git', '/bin/git']);
 });
 
 test('HTTPS forwarding trusts only the socket proxy allowlist', () => {

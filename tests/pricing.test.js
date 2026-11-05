@@ -72,6 +72,20 @@ test('unknown versions never inherit neighboring or newer model prices', () => {
   assert.equal(lookupRates('anthropic', 'claude-opus-4-1-20250805').input, 15);
 });
 
+test('legacy NVIDIA Kimi aliases retain existing namespaced pricing overrides', t => {
+  const pricing = withOverrides(t, {
+    'nvidia/moonshotai/kimi-k2.5': { input: 1, output: 2, cacheRead: 0.2, cacheWrite: 1.5 }
+  });
+  for (const model of ['kimi-k2.5', 'moonshotai/kimi-k2.5', 'nvidia/moonshotai/kimi-k2.5']) {
+    assert.equal(normalizeModel('NVIDIA', model), 'moonshotai/kimi-k2.5');
+    assert.equal(pricing.lookupRates('nvidia', model).input, 1);
+    const info = pricing.getCostInfo({ provider: 'nvidia', model, usage: { input: 1e6, output: 1e6 } });
+    assert.deepEqual([info.cost, info.priced, info.source], [3, true, 'override']);
+  }
+  assert.equal(normalizeModel('custom', 'kimi-k2.5'), 'kimi-k2.5', 'the legacy alias remains NVIDIA-specific');
+  assert.equal(createPricing().lookupRates('nvidia', 'kimi-k2.5'), null, 'the alias does not invent a default price');
+});
+
 test('exact custom overrides win over inferred upstream overrides and defaults', t => {
   const pricing = withOverrides(t, {
     'anthropic/claude-opus-4.6': { input: 8, output: 40 },

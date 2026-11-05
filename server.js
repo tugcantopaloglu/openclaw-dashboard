@@ -4,7 +4,7 @@ const path = require('path');
 const os = require('os');
 const { exec } = require('child_process');
 const crypto = require('crypto');
-const { isHTTPS, hasFreshReauth, atomicWriteFileSync, loadRecoveryToken } = require('./lib/security');
+const { isHTTPS, hasFreshReauth, atomicWriteFileSync, loadRecoveryToken, resolveGitExecutable } = require('./lib/security');
 
 const PORT = parseInt(process.env.DASHBOARD_PORT || '7000');
 const HOST = process.env.DASHBOARD_HOST || '0.0.0.0';
@@ -208,12 +208,8 @@ function setSecurityHeaders(res) {
 }
 
 function setSameSiteCORS(req, res) {
-  const host = req.headers.host;
-  const proto = isHTTPS(req, process.env.DASHBOARD_TRUSTED_PROXIES) ? 'https' : 'http';
-  const expectedOrigin = `${proto}://${host}`;
-  if (req.headers.origin === expectedOrigin || !req.headers.origin) {
-    res.setHeader('Access-Control-Allow-Origin', expectedOrigin);
-  }
+  // The dashboard is same-origin only; no cross-origin access grant is needed.
+  res.setHeader('Vary', 'Origin');
 }
 
 function checkRateLimit(ip) {
@@ -1064,12 +1060,14 @@ function getCronJobs() {
 function getGitActivity() {
   try {
     const { execFileSync } = require('child_process');
+    const gitExecutable = resolveGitExecutable();
+    if (!gitExecutable) return [];
     const repos = getGitRepos();
     const commits = [];
     for (const repo of repos) {
       try {
         if (!fs.existsSync(path.join(repo.path, '.git'))) continue;
-        const log = execFileSync('git', ['-C', repo.path, 'log', '--oneline', '--since=7 days ago', '-10', '--format=%H|%s|%at'], { encoding: 'utf8', timeout: 5000 }).trim();
+        const log = execFileSync(gitExecutable, ['-C', repo.path, 'log', '--oneline', '--since=7 days ago', '-10', '--format=%H|%s|%at'], { encoding: 'utf8', timeout: 5000 }).trim();
         if (!log) continue;
         log.split('\n').forEach(line => {
           const [hash, msg, ts] = line.split('|');

@@ -1,6 +1,6 @@
 FROM node:24-alpine
 
-RUN apk add --no-cache docker-cli curl jq
+RUN apk add --no-cache curl docker-cli jq
 
 WORKDIR /app
 
@@ -20,6 +20,6 @@ ENV DASHBOARD_ALLOW_HTTP=true
 EXPOSE 3001
 
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
-  CMD curl -sf http://127.0.0.1:${DASHBOARD_PORT:-3001}/api/health || exit 1
+  CMD curl -sf "http://127.0.0.1:${DASHBOARD_PORT:-3001}/api/health" || exit 1
 
 CMD ["node", "server.js"]

@@ -1,3 +1,20 @@
+# OpenClaw Dashboard v3.0.2 - Security Review Follow-up
+
+- Keep browser API access same-origin without reflecting request headers into
+  CORS response headers.
+- Resolve git from explicit system locations instead of relying on the process
+  PATH. Use `DASHBOARD_GIT_BIN` with an absolute path for custom installations.
+- Preserve the original atomic-write failure if closing or removing a temporary
+  file also fails; cleanup cannot mask the actual write error.
+- Quote the Docker healthcheck URL and add focused regression coverage for these
+  security-review findings. All v3.0.1 security and pricing fixes are included.
+- Preserve the legacy NVIDIA Kimi model alias for existing custom pricing files.
+
+Upgrade by pulling the release and restarting, or rebuilding your Docker image.
+There is no credential or session-data migration.
+
+---
+
 # OpenClaw Dashboard v3.0.1 - Security and Cost Accuracy
 
 ## Security fixes
