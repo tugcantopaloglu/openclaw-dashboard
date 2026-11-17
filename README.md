@@ -77,6 +77,10 @@ node server.js
 
 Visit `http://localhost:7000` in your browser. On first visit, you'll see a **registration screen** where you create your username and password. After registration, log in with your credentials.
 
+## One-Click Deploy
+
+[![Deploy on RepoCloud](https://d16t0pc4846x52.cloudfront.net/deploylobe.svg)](https://repocloud.io/details/OpenClaw%20Dashboard/)
+
 ## Installation
 
 ### Prerequisites
